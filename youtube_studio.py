@@ -50,6 +50,58 @@ def _otr_name(url):
             return name
     return 'Custom'
 
+# ── Quality defaults ─────────────────────────────────────────────────────────
+# Stored in config.json under 'quality'. All values are floats in UI-friendly
+# ranges that map directly to rpicam-vid flags and ffmpeg eq filter.
+#   brightness : -1.0 → +1.0   (0.0  = no change)
+#   contrast   :  0.0 → 2.0    (1.0  = no change)
+#   saturation :  0.0 → 2.0    (1.0  = no change)
+#   sharpness  :  0.0 → 2.0    (1.0  = no change)
+#   zoom       :  1.0 → 4.0    (1.0  = full sensor, 2.0 = 2× center crop)
+_QUALITY_DEFAULTS = {
+    'brightness': 0.0,
+    'contrast':   1.0,
+    'saturation': 1.0,
+    'sharpness':  1.0,
+    'zoom':       1.0,
+}
+
+def _get_quality(cfg):
+    q = dict(_QUALITY_DEFAULTS)
+    q.update(cfg.get('quality', {}))
+    # clamp to valid ranges
+    q['brightness'] = max(-1.0, min(1.0,  float(q['brightness'])))
+    q['contrast']   = max(0.0,  min(2.0,  float(q['contrast'])))
+    q['saturation'] = max(0.0,  min(2.0,  float(q['saturation'])))
+    q['sharpness']  = max(0.0,  min(2.0,  float(q['sharpness'])))
+    q['zoom']       = max(1.0,  min(4.0,  float(q['zoom'])))
+    return q
+
+def _csi_quality_args(q):
+    """Extra rpicam-vid flags for CSI cameras."""
+    args = [
+        '--brightness', f"{q['brightness']:.3f}",
+        '--contrast',   f"{q['contrast']:.3f}",
+        '--saturation', f"{q['saturation']:.3f}",
+        '--sharpness',  f"{q['sharpness']:.3f}",
+    ]
+    z = q['zoom']
+    if z > 1.01:
+        w = 1.0 / z
+        x = (1.0 - w) / 2.0
+        args += ['--roi', f'{x:.4f},{x:.4f},{w:.4f},{w:.4f}']
+    return args
+
+def _usb_quality_filter(q):
+    """ffmpeg eq filter string for USB cameras."""
+    # ffmpeg eq: brightness -1..1, contrast 0..2, saturation 0..3
+    sat = q['saturation'] * 1.5   # map 0-2 → 0-3
+    return (
+        f"eq=brightness={q['brightness']:.3f}"
+        f":contrast={q['contrast']:.3f}"
+        f":saturation={sat:.3f}"
+    )
+
 # ── Camera profiles ───────────────────────────────────────────────────────────
 # 'type' usb  → v4l2 H264 passthrough via ffmpeg
 # 'type' csi  → rpicam-vid H264 pipe into ffmpeg (HQ cam, Pi cam, etc.)
@@ -182,7 +234,7 @@ def _parse_mjpeg_frames(proc, on_frame):
             del buf[:end + 2]
             on_frame(frame)
 
-def _preview_worker(cam):
+def _preview_worker(cam, quality):
     global _prev_frame, _prev_proc, _prev_cam_name
     log.info('Preview starting → %s', cam['name'])
     _prev_cam_name = cam['name']
@@ -191,22 +243,25 @@ def _preview_worker(cam):
 
     if cam['type'] == 'usb':
         dev = cam.get('device') or _find_usb_video_device()
+        eq  = _usb_quality_filter(quality)
         cmd = [
             'ffmpeg', '-loglevel', 'quiet',
             '-f', 'v4l2', '-input_format', 'mjpeg',
             '-video_size', f'{pw}x{ph}', '-framerate', str(pfps),
             '-i', dev,
+            '-vf', eq,
             '-f', 'mjpeg', '-q:v', '5',
             'pipe:1',
         ]
     else:  # csi
-        cmd = [
-            'rpicam-vid', '-t', '0',
-            '--codec', 'mjpeg',
-            '--width', str(pw), '--height', str(ph),
-            '--framerate', str(pfps),
-            '--nopreview', '-o', '-',
-        ]
+        cmd = (
+            ['rpicam-vid', '-t', '0',
+             '--codec', 'mjpeg',
+             '--width', str(pw), '--height', str(ph),
+             '--framerate', str(pfps),
+             '--nopreview', '-o', '-']
+            + _csi_quality_args(quality)
+        )
 
     try:
         proc = subprocess.Popen(
@@ -238,7 +293,8 @@ def start_preview(cam):
     _prev_stop_evt.clear()
     with _prev_lock:
         _prev_frame = None
-    _prev_thread = threading.Thread(target=_preview_worker, args=(cam,), daemon=True)
+    quality = _get_quality(_load_cfg())
+    _prev_thread = threading.Thread(target=_preview_worker, args=(cam, quality), daemon=True)
     _prev_thread.start()
 
 def stop_preview():
@@ -262,7 +318,7 @@ _stream_proc_main  = None   # ffmpeg process
 _stream_proc_libcam = None  # rpicam-vid process (CSI only)
 _stream_stop_evt   = threading.Event()
 
-def _build_stream_cmds(cam, rtmp_url, otr_url):
+def _build_stream_cmds(cam, rtmp_url, otr_url, quality):
     w, h, fps = cam['stream_w'], cam['stream_h'], cam['stream_fps']
     if cam['type'] == 'usb':
         dev = cam.get('device') or _find_usb_video_device()
@@ -270,6 +326,7 @@ def _build_stream_cmds(cam, rtmp_url, otr_url):
             ['v4l2-ctl', '-d', dev, '--set-ctrl=h264_i_frame_period=60'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        eq = _usb_quality_filter(quality)
         libcam_cmd = None
         ffmpeg_cmd = [
             'ffmpeg', '-loglevel', 'warning',
@@ -278,23 +335,25 @@ def _build_stream_cmds(cam, rtmp_url, otr_url):
             '-i', dev,
             '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
             '-map', '0:v', '-map', '1:a',
-            '-c:v', 'copy',
+            '-vf', eq,
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
             '-b:v', '2500k',
             '-c:a', 'aac', '-b:a', '128k',
             '-f', 'flv', rtmp_url,
         ]
     else:  # csi
-        libcam_cmd = [
-            'rpicam-vid', '-t', '0',
-            '--codec', 'h264',
-            '--profile', 'high', '--level', '4.1',
-            '--width', str(w), '--height', str(h),
-            '--framerate', str(fps),
-            '--bitrate', '4000000',
-            '--intra', str(fps * 2),
-            '--inline', '--nopreview',
-            '-o', '-',
-        ]
+        libcam_cmd = (
+            ['rpicam-vid', '-t', '0',
+             '--codec', 'h264',
+             '--profile', 'high', '--level', '4.1',
+             '--width', str(w), '--height', str(h),
+             '--framerate', str(fps),
+             '--bitrate', '4000000',
+             '--intra', str(fps * 2),
+             '--inline', '--nopreview',
+             '-o', '-']
+            + _csi_quality_args(quality)
+        )
         ffmpeg_cmd = [
             'ffmpeg', '-loglevel', 'warning',
             '-f', 'h264', '-i', 'pipe:0',
@@ -306,14 +365,14 @@ def _build_stream_cmds(cam, rtmp_url, otr_url):
         ]
     return libcam_cmd, ffmpeg_cmd
 
-def _stream_worker(cam, rtmp_url, otr_url):
+def _stream_worker(cam, rtmp_url, otr_url, quality):
     global _stream_proc_main, _stream_proc_libcam, _stream_state
 
     MAX_RETRIES = 5
     retries = 0
 
     def _launch():
-        libcam_cmd, ffmpeg_cmd = _build_stream_cmds(cam, rtmp_url, otr_url)
+        libcam_cmd, ffmpeg_cmd = _build_stream_cmds(cam, rtmp_url, otr_url, quality)
         if libcam_cmd:
             lc = subprocess.Popen(libcam_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             ff = subprocess.Popen(ffmpeg_cmd, stdin=lc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -380,11 +439,12 @@ def start_stream(cam_idx):
         cam['device'] = _find_usb_video_device()
 
     otr_url  = cfg.get('otr_station_url', _OTR_DEFAULT).strip() or _OTR_DEFAULT
+    quality  = _get_quality(cfg)
     rtmp_url = f'{_YT_RTMP_BASE}/{stream_key}'
 
     _stream_stop_evt.clear()
     _stream_thread = threading.Thread(
-        target=_stream_worker, args=(cam, rtmp_url, otr_url), daemon=True
+        target=_stream_worker, args=(cam, rtmp_url, otr_url, quality), daemon=True
     )
     _stream_thread.start()
     return True, 'Stream starting…'
@@ -432,8 +492,13 @@ input[type=text]:focus,input[type=password]:focus,select:focus{{outline:none;bor
 .btn-red{{background:#cc2200;color:#fff}}
 .btn-green{{background:#1a6b1a;color:#fff}}
 .btn-grey{{background:#333;color:#ccc}}
+.btn-blue{{background:#1a4b8a;color:#fff}}
 .status-bar{{padding:10px 18px;background:#111;border-top:1px solid #222;font-size:12px;color:#666}}
 #status-dot{{display:inline-block;width:10px;height:10px;border-radius:50%;background:#444;margin-right:6px}}
+.slider-row{{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:13px}}
+.slider-row label{{width:90px;color:#aaa}}
+.slider-row input[type=range]{{flex:1;accent-color:#4a9eff}}
+.slider-row .sv{{width:36px;text-align:right;color:#eee}}
 #status-dot.live{{background:#ff2222;box-shadow:0 0 6px #ff2222}}
 #status-txt{{color:#aaa}}
 #uptime{{color:#80ff80;margin-left:10px}}
@@ -484,7 +549,7 @@ input[type=text]:focus,input[type=password]:focus,select:focus{{outline:none;bor
     <div id="save-msg" style="font-size:12px;color:#80ff80;margin-top:6px"></div>
   </div>
 
-  <!-- Right: live preview -->
+   <!-- Right: live preview -->
   <div class="panel" style="flex:2;min-width:300px">
     <h2>&#128247; Focus Preview (live · ~5 fps)</h2>
     <div class="hint" style="margin-bottom:8px">
@@ -500,6 +565,15 @@ input[type=text]:focus,input[type=password]:focus,select:focus{{outline:none;bor
     <div style="margin-top:8px">
       <button class="btn btn-grey" onclick="switchPreview()">&#8635; Refresh Preview</button>
       <button class="btn btn-grey" onclick="toggleGrid()">&#9638; Grid</button>
+    </div>
+
+    <!-- Quality Controls -->
+    <div style="margin-top:16px;border-top:1px solid #222;padding-top:12px">
+      <h2 style="margin-top:0">&#127922; Quality Controls</h2>
+      <div id="slider-wrap">
+        {sliders_html}
+      </div>
+      <button class="btn btn-blue" onclick="applyQuality()" style="margin-top:8px">&#10003; Apply to Preview</button>
     </div>
   </div>
 
@@ -598,6 +672,16 @@ function updateStatus() {{
       camSel.value = String(best);
       switchPreview();
     }}
+    // Populate sliders from status on first load (don't overwrite if user changed them)
+    if (!window._qualInitDone && s.quality) {{
+      window._qualInitDone = true;
+      var q = s.quality;
+      setSlider('brightness', Math.round(q.brightness * 100));
+      setSlider('contrast',   Math.round(q.contrast   * 100));
+      setSlider('saturation', Math.round(q.saturation * 100));
+      setSlider('sharpness',  Math.round(q.sharpness  * 100));
+      setSlider('zoom',       Math.round(q.zoom       * 10));
+    }}
     document.getElementById('footer').textContent =
       'YouTube Studio · http://{ip}:{port}' + (s.running ? '  ·  streaming to YouTube' : '');
   }}).catch(function(){{}});
@@ -605,9 +689,39 @@ function updateStatus() {{
 
 setInterval(updateStatus, 2000);
 updateStatus();
+
+function setSlider(id, val) {{
+  var el = document.getElementById('sl-' + id);
+  if (el) {{ el.value = val; el.dispatchEvent(new Event('input')); }}
+}}
+
+function applyQuality() {{
+  var b  = parseInt(document.getElementById('sl-brightness').value);
+  var c  = parseInt(document.getElementById('sl-contrast').value);
+  var sa = parseInt(document.getElementById('sl-saturation').value);
+  var sh = parseInt(document.getElementById('sl-sharpness').value);
+  var z  = parseInt(document.getElementById('sl-zoom').value);
+  fetch('/quality', {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+    body: 'brightness='+(b/100)+'&contrast='+(c/100)+'&saturation='+(sa/100)+'&sharpness='+(sh/100)+'&zoom='+(z/10)
+  }}).then(r=>r.json()).then(d=>{{
+    if (!d.ok) alert('Quality error: ' + d.msg);
+  }});
+}}
 </script>
 </body>
 </html>"""
+
+
+def _qual_slider_html(id_, label, mn, mx, default):
+    """Render a single quality slider row as HTML."""
+    return (
+        f'<div class="slider-row">'
+        f'<label>{label}</label>'
+        f'<input type="range" id="sl-{id_}" min="{mn}" max="{mx}" value="{default}" '
+        f'oninput="document.getElementById(\'sv-{id_}\').textContent=this.value">'
+        f'<span class="sv" id="sv-{id_}">{default}</span>'
+        f'</div>'
+    )
 
 
 def _render_dashboard():
@@ -616,12 +730,21 @@ def _render_dashboard():
     stream_key = cfg.get('youtube_stream_key', '')
     otr_url    = cfg.get('otr_station_url', _OTR_DEFAULT)
     cam_names  = json.dumps({str(i): c['short'] for i, c in enumerate(_CAMERAS)})
+    q          = _get_quality(cfg)
+    sliders_html = ''.join([
+        _qual_slider_html('brightness', 'Brightness', -100, 100, round(q['brightness'] * 100)),
+        _qual_slider_html('contrast',   'Contrast',     0, 200, round(q['contrast']   * 100)),
+        _qual_slider_html('saturation', 'Saturation',   0, 200, round(q['saturation'] * 100)),
+        _qual_slider_html('sharpness',  'Sharpness',    0, 200, round(q['sharpness']  * 100)),
+        _qual_slider_html('zoom',       'Zoom (x)',     10,  40, round(q['zoom']       * 10)),
+    ])
     return _DASHBOARD_HTML.format(
         ip=ip, port=_PORT,
         stream_key=stream_key,
         cam_opts=_camera_options(0),
         otr_opts=_otr_options(otr_url),
         cam_names_json=cam_names,
+        sliders_html=sliders_html,
     ).encode()
 
 
@@ -663,6 +786,31 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == '/stop':
             stop_stream()
             self._json({'ok': True, 'msg': 'Stopping…'})
+
+        elif path == '/quality':
+            cfg = _load_cfg()
+            q   = _get_quality(cfg)
+            try:
+                q['brightness'] = float(get('brightness', q['brightness']))
+                q['contrast']   = float(get('contrast',   q['contrast']))
+                q['saturation'] = float(get('saturation', q['saturation']))
+                q['sharpness']  = float(get('sharpness',  q['sharpness']))
+                q['zoom']       = float(get('zoom',       q['zoom']))
+            except ValueError as exc:
+                self._json({'ok': False, 'msg': str(exc)})
+                return
+            cfg['quality'] = _get_quality({'quality': q})  # clamp
+            _save_cfg(cfg)
+            # Restart preview with new quality so sliders update the live feed
+            if _prev_cam_name:
+                idx = next((i for i, c in enumerate(_CAMERAS)
+                            if c['name'] == _prev_cam_name), 0)
+                cam = dict(_CAMERAS[idx])
+                if cam['type'] == 'usb':
+                    cam['device'] = _find_usb_video_device()
+                start_preview(cam)
+            log.info('Quality updated → %s', cfg['quality'])
+            self._json({'ok': True, 'quality': cfg['quality']})
 
         elif path == '/settings':
             cfg = _load_cfg()
@@ -751,6 +899,7 @@ class _Handler(BaseHTTPRequestHandler):
             'error':          s['error'],
             'available_cams': _available_cams,
             'preview_cam':    _prev_cam_name or '',
+            'quality':        _get_quality(_load_cfg()),
         })
 
     # ── helpers ───────────────────────────────────────────────────────────────
