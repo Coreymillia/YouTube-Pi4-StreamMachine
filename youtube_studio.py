@@ -10,10 +10,16 @@ Preview: http://<pi-ip>:8090/preview   (live MJPEG ~5 fps, use for focus)
 Status:  http://<pi-ip>:8090/status    (JSON)
 """
 
-import os, sys, time, subprocess, threading, json, socket, logging
-import collections
+import os, sys, time, subprocess, threading, json, socket, logging, html
+import collections, random
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, unquote_plus
+from urllib.parse import parse_qs, unquote_plus, urlencode
+
+try:
+    import requests as _http
+    _REQUESTS_OK = True
+except ImportError:
+    _REQUESTS_OK = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -447,13 +453,302 @@ def start_stream(cam_idx):
         target=_stream_worker, args=(cam, rtmp_url, otr_url, quality), daemon=True
     )
     _stream_thread.start()
+    start_bot()
     return True, 'Stream starting…'
 
 def stop_stream():
+    stop_bot()
     _stream_stop_evt.set()
     with _stream_lock:
         _terminate(_stream_proc_libcam)
         _terminate(_stream_proc_main)
+
+# ── YouTube Live Chat Bot ─────────────────────────────────────────────────────
+_TOKEN_PATH      = os.path.join(_PROJECT_DIR, 'token.json')
+_OAUTH_AUTH_URL  = 'https://accounts.google.com/o/oauth2/v2/auth'
+_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
+_YT_API          = 'https://www.googleapis.com/youtube/v3'
+_OAUTH_SCOPE     = 'https://www.googleapis.com/auth/youtube'
+
+_BOT_DEFAULTS = {
+    'enabled':                  False,
+    'headless_message':         "Hey chat! \U0001f399\ufe0f I'm headless \u2014 no screen or keyboard here, so I can't see your messages live. Stream on!",
+    'random_messages':          [],
+    'random_interval_minutes':  10,
+    'keyword_triggers':         {},
+    'oauth_client_id':          '',
+    'oauth_client_secret':      '',
+}
+
+
+def _get_bot_cfg(cfg=None):
+    if cfg is None:
+        cfg = _load_cfg()
+    b = dict(_BOT_DEFAULTS)
+    b.update(cfg.get('chat_bot', {}))
+    return b
+
+
+def _save_bot_cfg(bot_cfg):
+    cfg = _load_cfg()
+    cfg['chat_bot'] = bot_cfg
+    _save_cfg(cfg)
+
+
+# ── OAuth2 token helpers ──────────────────────────────────────────────────────
+def _load_token():
+    try:
+        with open(_TOKEN_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_token(tok):
+    with open(_TOKEN_PATH, 'w') as f:
+        json.dump(tok, f, indent=4)
+
+
+def _refresh_access_token(bot_cfg, tok):
+    try:
+        r = _http.post(_OAUTH_TOKEN_URL, data={
+            'client_id':     bot_cfg['oauth_client_id'],
+            'client_secret': bot_cfg['oauth_client_secret'],
+            'refresh_token': tok['refresh_token'],
+            'grant_type':    'refresh_token',
+        }, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        tok['access_token'] = data['access_token']
+        tok['expires_at']   = time.time() + data.get('expires_in', 3600) - 60
+        _save_token(tok)
+        return tok
+    except Exception as exc:
+        log.error('ChatBot: token refresh failed: %s', exc)
+        return None
+
+
+def _get_access_token(bot_cfg):
+    tok = _load_token()
+    if not tok:
+        return None
+    if time.time() >= tok.get('expires_at', 0):
+        tok = _refresh_access_token(bot_cfg, tok)
+    return tok.get('access_token') if tok else None
+
+
+def _build_oauth_redirect_uri():
+    return f'http://{_get_local_ip()}:{_PORT}/oauth2callback'
+
+
+def _build_auth_url(bot_cfg):
+    return _OAUTH_AUTH_URL + '?' + urlencode({
+        'client_id':     bot_cfg['oauth_client_id'],
+        'redirect_uri':  _build_oauth_redirect_uri(),
+        'response_type': 'code',
+        'scope':         _OAUTH_SCOPE,
+        'access_type':   'offline',
+        'prompt':        'consent',
+    })
+
+
+def _exchange_code(bot_cfg, code):
+    try:
+        r = _http.post(_OAUTH_TOKEN_URL, data={
+            'client_id':     bot_cfg['oauth_client_id'],
+            'client_secret': bot_cfg['oauth_client_secret'],
+            'code':          code,
+            'redirect_uri':  _build_oauth_redirect_uri(),
+            'grant_type':    'authorization_code',
+        }, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        data['expires_at'] = time.time() + data.get('expires_in', 3600) - 60
+        _save_token(data)
+        return True, 'Bot authorized successfully!'
+    except Exception as exc:
+        return False, str(exc)
+
+
+# ── Chat Bot class ────────────────────────────────────────────────────────────
+_bot_stop_evt    = threading.Event()
+_bot_status_lock = threading.Lock()
+_bot_status = {
+    'running':       False,
+    'messages_sent': 0,
+    'error':         '',
+    'authorized':    False,
+}
+
+
+class _ChatBot:
+    def __init__(self, bot_cfg):
+        self.cfg            = bot_cfg
+        self._live_chat_id  = None
+        self._page_token    = None
+        self._poll_interval = 8.0
+        self._last_random   = time.time()
+
+    def _headers(self):
+        tok = _get_access_token(self.cfg)
+        if not tok:
+            return None
+        return {'Authorization': f'Bearer {tok}', 'Content-Type': 'application/json'}
+
+    def _get_live_chat_id(self):
+        h = self._headers()
+        if not h:
+            return None
+        try:
+            r = _http.get(f'{_YT_API}/liveBroadcasts', headers=h,
+                          params={'part': 'snippet', 'broadcastStatus': 'active', 'mine': 'true'},
+                          timeout=10)
+            r.raise_for_status()
+            items = r.json().get('items', [])
+            if items:
+                return items[0]['snippet']['liveChatId']
+        except Exception as exc:
+            log.error('ChatBot: getLiveChatId failed: %s', exc)
+        return None
+
+    def _poll(self):
+        if not self._live_chat_id:
+            return []
+        h = self._headers()
+        if not h:
+            return []
+        params = {'part': 'snippet,authorDetails', 'liveChatId': self._live_chat_id}
+        if self._page_token:
+            params['pageToken'] = self._page_token
+        try:
+            r = _http.get(f'{_YT_API}/liveChatMessages', headers=h, params=params, timeout=10)
+            if r.status_code == 403:
+                log.warning('ChatBot: 403 — quota or permission, slowing poll')
+                self._poll_interval = 30.0
+                return []
+            r.raise_for_status()
+            data = r.json()
+            self._page_token    = data.get('nextPageToken')
+            self._poll_interval = max(5.0, data.get('pollingIntervalMillis', 5000) / 1000.0)
+            return data.get('items', [])
+        except Exception as exc:
+            log.error('ChatBot: poll failed: %s', exc)
+        return []
+
+    def post(self, text):
+        if not self._live_chat_id or not text.strip():
+            return False
+        h = self._headers()
+        if not h:
+            return False
+        try:
+            r = _http.post(
+                f'{_YT_API}/liveChatMessages', headers=h,
+                params={'part': 'snippet'},
+                json={'snippet': {
+                    'liveChatId':         self._live_chat_id,
+                    'type':               'textMessageEvent',
+                    'textMessageDetails': {'messageText': text[:200]},
+                }},
+                timeout=10,
+            )
+            r.raise_for_status()
+            with _bot_status_lock:
+                _bot_status['messages_sent'] += 1
+            log.info('ChatBot: sent → %s', text[:60])
+            return True
+        except Exception as exc:
+            log.error('ChatBot: post failed: %s', exc)
+        return False
+
+    def _handle(self, item):
+        try:
+            text   = item['snippet']['displayMessage'].lower()
+            author = item['authorDetails']['displayName']
+        except (KeyError, TypeError):
+            return
+        for kw, resp in self.cfg.get('keyword_triggers', {}).items():
+            if kw.lower() in text:
+                log.info('ChatBot: keyword "%s" triggered by %s', kw, author)
+                self.post(resp)
+                return  # one response per message
+
+    def run(self):
+        self._poll_interval = 8.0
+        log.info('ChatBot: starting')
+        with _bot_status_lock:
+            _bot_status['running'] = True
+            _bot_status['error']   = ''
+
+        for _ in range(18):   # retry up to ~3 min while stream initialises
+            if _bot_stop_evt.is_set():
+                break
+            self._live_chat_id = self._get_live_chat_id()
+            if self._live_chat_id:
+                log.info('ChatBot: live chat found → %s…', self._live_chat_id[:20])
+                break
+            time.sleep(10)
+
+        if not self._live_chat_id:
+            err = 'No active broadcast found'
+            log.warning('ChatBot: %s', err)
+            with _bot_status_lock:
+                _bot_status['error']   = err
+                _bot_status['running'] = False
+            return
+
+        self._poll()  # drain existing messages so we don't replay history
+
+        hm = self.cfg.get('headless_message', '').strip()
+        if hm:
+            time.sleep(5)
+            self.post(hm)
+
+        while not _bot_stop_evt.is_set():
+            for item in self._poll():
+                if _bot_stop_evt.is_set():
+                    break
+                self._handle(item)
+
+            rand_msgs = self.cfg.get('random_messages', [])
+            interval  = float(self.cfg.get('random_interval_minutes', 10)) * 60
+            if rand_msgs and interval > 0 and (time.time() - self._last_random) >= interval:
+                self.post(random.choice(rand_msgs))
+                self._last_random = time.time()
+
+            _bot_stop_evt.wait(self._poll_interval)
+
+        with _bot_status_lock:
+            _bot_status['running'] = False
+        log.info('ChatBot: stopped')
+
+
+_bot_thread = None
+
+
+def start_bot():
+    global _bot_thread
+    if not _REQUESTS_OK:
+        log.warning('ChatBot: requests library not installed')
+        return
+    bot_cfg = _get_bot_cfg()
+    if not bot_cfg.get('enabled'):
+        return
+    if not _load_token():
+        log.warning('ChatBot: no OAuth token — authorize via web UI first')
+        return
+    with _bot_status_lock:
+        _bot_status['authorized']    = True
+        _bot_status['messages_sent'] = 0
+    _bot_stop_evt.clear()
+    bot = _ChatBot(bot_cfg)
+    _bot_thread = threading.Thread(target=bot.run, daemon=True)
+    _bot_thread.start()
+
+
+def stop_bot():
+    _bot_stop_evt.set()
+
 
 # ── HTML dashboard ─────────────────────────────────────────────────────────────
 def _otr_options(selected_url):
@@ -510,6 +805,20 @@ input[type=text]:focus,input[type=password]:focus,select:focus{{outline:none;bor
 .preview-label{{position:absolute;top:4px;left:4px;background:rgba(0,0,0,.6);color:#ffff50;font-size:11px;padding:2px 6px;border-radius:3px}}
 .hint{{font-size:11px;color:#555;margin-top:4px}}
 .err{{color:#ff6666;font-size:12px;margin-top:6px}}
+.toggle-wrap{{display:inline-flex;align-items:center;cursor:pointer;user-select:none}}
+.toggle-wrap input{{position:absolute;opacity:0;width:0;height:0}}
+.toggle-slider{{position:relative;display:inline-block;width:38px;height:20px;background:#333;border-radius:10px;transition:background .2s;flex-shrink:0}}
+.toggle-slider:before{{content:'';position:absolute;width:16px;height:16px;left:2px;top:2px;background:#888;border-radius:50%;transition:transform .2s,background .2s}}
+.toggle-wrap input:checked + .toggle-slider{{background:#1a4b8a}}
+.toggle-wrap input:checked + .toggle-slider:before{{transform:translateX(18px);background:#4a9eff}}
+.bot-dot{{display:inline-block;width:8px;height:8px;border-radius:50%;background:#444;flex-shrink:0}}
+.bot-dot.bot-live{{background:#ff2222;box-shadow:0 0 5px #ff2222}}
+.kw-row{{display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #1e1e1e;font-size:12px}}
+.rm-row{{display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #1e1e1e;font-size:12px}}
+.rm-btn{{background:none;border:none;color:#cc4444;cursor:pointer;font-size:14px;padding:0 4px;line-height:1}}
+details>summary{{cursor:pointer;color:#666;font-size:11px;text-transform:uppercase;letter-spacing:1px;outline:none;list-style:none}}
+details>summary::-webkit-details-marker{{display:none}}
+details[open]>summary{{color:#aaa}}
 </style>
 </head>
 <body>
@@ -578,6 +887,8 @@ input[type=text]:focus,input[type=password]:focus,select:focus{{outline:none;bor
   </div>
 
 </div>
+
+{bot_panel_html}
 
 <div class="status-bar" id="footer">
   YouTube Studio · http://{ip}:{port} · use /status for JSON
@@ -707,6 +1018,7 @@ function applyQuality() {{
     if (!d.ok) alert('Quality error: ' + d.msg);
   }});
 }}
+{bot_panel_js}
 </script>
 </body>
 </html>"""
@@ -724,6 +1036,229 @@ def _qual_slider_html(id_, label, mn, mx, default):
     )
 
 
+def _build_bot_panel_html(bot_cfg, auth_status_html, redirect_uri):
+    checked         = 'checked' if bot_cfg.get('enabled') else ''
+    client_id       = html.escape(bot_cfg.get('oauth_client_id', ''))
+    headless_msg    = html.escape(bot_cfg.get('headless_message', ''))
+    rand_interval   = int(bot_cfg.get('random_interval_minutes', 10))
+    return f"""
+<div class="layout" style="padding-top:0">
+  <div class="panel" style="flex:1;min-width:100%">
+    <h2>&#129302; YouTube Live Chat Bot</h2>
+    <div style="display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin-bottom:14px">
+      <label class="toggle-wrap">
+        <input type="checkbox" id="bot-enabled" {checked}>
+        <span class="toggle-slider"></span>
+        <span style="margin-left:8px;color:#ccc;font-size:13px">Enable Bot</span>
+      </label>
+      <span class="bot-dot" id="bot-dot"></span>
+      <span id="bot-status-txt" style="color:#888;font-size:12px">Not running</span>
+      <span id="bot-msgs-sent" style="color:#4a9eff;font-size:12px;margin-left:6px"></span>
+    </div>
+
+    <div style="display:flex;flex-wrap:wrap;gap:16px">
+
+      <!-- OAuth + headless message + interval -->
+      <div style="flex:1;min-width:260px">
+        <details id="oauth-section">
+          <summary>&#9658; OAuth2 Setup (Google API)</summary>
+          <div style="margin-top:10px;padding:10px;background:#0d0d0d;border-radius:4px">
+            <div class="hint" style="margin-bottom:8px;line-height:1.6">
+              1. Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:#4a9eff">Google Cloud Console</a>
+              &rarr; Create OAuth 2.0 Client ID (Web application).<br>
+              2. Enable the <strong style="color:#ccc">YouTube Data API v3</strong>.<br>
+              3. Add <code style="color:#ff9900;font-size:11px">{html.escape(redirect_uri)}</code> as an authorized redirect URI.<br>
+              4. Paste credentials below and click Authorize.
+            </div>
+            <label>Client ID</label>
+            <input type="text" id="bot-client-id" value="{client_id}" placeholder="...apps.googleusercontent.com">
+            <label style="margin-top:8px">Client Secret</label>
+            <input type="password" id="bot-client-secret" placeholder="leave blank to keep existing">
+            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button class="btn btn-grey" onclick="saveBotSettings()" style="margin:0">&#128190; Save</button>
+              <button class="btn btn-blue" id="auth-btn" onclick="authBot()" style="margin:0">&#128273; Authorize Bot</button>
+              <span id="auth-status" style="font-size:12px">{auth_status_html}</span>
+            </div>
+          </div>
+        </details>
+
+        <label style="margin-top:14px">Headless Message</label>
+        <div class="hint">Posted to chat when your stream goes live</div>
+        <textarea id="bot-headless" rows="3" style="width:100%;margin-top:4px;background:#1e1e1e;color:#fff;border:1px solid #3a3a3a;padding:7px;border-radius:4px;font-family:monospace;font-size:12px;resize:vertical">{headless_msg}</textarea>
+
+        <label style="margin-top:10px">Random Message Interval</label>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <input type="number" id="bot-interval" value="{rand_interval}" min="0" max="120"
+            style="width:70px;background:#1e1e1e;color:#fff;border:1px solid #3a3a3a;padding:7px;border-radius:4px;font-family:monospace;font-size:13px">
+          <span class="hint" style="margin:0">minutes &nbsp;(0 = disabled)</span>
+        </div>
+      </div>
+
+      <!-- Random messages -->
+      <div style="flex:1;min-width:220px">
+        <label>Random Messages</label>
+        <div class="hint">One is picked at random every N minutes while live</div>
+        <div id="rand-msg-list" style="margin-top:6px;max-height:200px;overflow-y:auto"></div>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <input type="text" id="new-rand-msg" placeholder="Add a message…" style="flex:1;font-size:12px"
+            onkeydown="if(event.key==='Enter')addRandMsg()">
+          <button class="btn btn-grey" onclick="addRandMsg()" style="margin:0;padding:6px 12px">+ Add</button>
+        </div>
+      </div>
+
+      <!-- Keyword triggers -->
+      <div style="flex:1;min-width:220px">
+        <label>Keyword Triggers</label>
+        <div class="hint">Bot replies when it spots a keyword in any message</div>
+        <div id="kw-list" style="margin-top:6px;max-height:200px;overflow-y:auto"></div>
+        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+          <input type="text" id="new-kw"   placeholder="keyword"  style="flex:1;min-width:70px;font-size:12px">
+          <input type="text" id="new-resp" placeholder="response" style="flex:2;min-width:110px;font-size:12px"
+            onkeydown="if(event.key==='Enter')addKeyword()">
+          <button class="btn btn-grey" onclick="addKeyword()" style="margin:0;padding:6px 12px">+ Add</button>
+        </div>
+      </div>
+
+    </div>
+
+    <div style="margin-top:14px;display:flex;align-items:center;flex-wrap:wrap;gap:10px">
+      <button class="btn btn-blue" onclick="saveBotSettings()">&#128190; Save Bot Settings</button>
+      <span id="bot-save-msg" style="font-size:12px;color:#80ff80"></span>
+    </div>
+  </div>
+</div>"""
+
+
+def _build_bot_panel_js(bot_cfg):
+    msgs_json = json.dumps(bot_cfg.get('random_messages', []))
+    kw_json   = json.dumps(bot_cfg.get('keyword_triggers', {}))
+    return f"""
+// ── Chat Bot ─────────────────────────────────────────────────────────────────
+var _randMsgs   = {msgs_json};
+var _kwTriggers = {kw_json};
+
+function _escH(s) {{
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}}
+
+function renderRandMsgs() {{
+  var el = document.getElementById('rand-msg-list');
+  if (!el) return;
+  el.innerHTML = '';
+  _randMsgs.forEach(function(msg, i) {{
+    var d = document.createElement('div');
+    d.className = 'rm-row';
+    d.innerHTML = '<span style="flex:1;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _escH(msg) + '</span>'
+      + '<button class="rm-btn" onclick="removeRandMsg(' + i + ')">&#10005;</button>';
+    el.appendChild(d);
+  }});
+}}
+
+function renderKeywords() {{
+  var el = document.getElementById('kw-list');
+  if (!el) return;
+  el.innerHTML = '';
+  Object.keys(_kwTriggers).forEach(function(kw) {{
+    var d = document.createElement('div');
+    d.className = 'kw-row';
+    d.innerHTML = '<span style="min-width:70px;color:#ffcc44;overflow:hidden;text-overflow:ellipsis">' + _escH(kw) + '</span>'
+      + '<span style="color:#888;padding:0 4px">&#8594;</span>'
+      + '<span style="flex:1;color:#ccc;overflow:hidden;text-overflow:ellipsis">' + _escH(_kwTriggers[kw]) + '</span>'
+      + '<button class="rm-btn" onclick="removeKeyword(' + JSON.stringify(kw) + ')">&#10005;</button>';
+    el.appendChild(d);
+  }});
+}}
+
+function addRandMsg() {{
+  var v = document.getElementById('new-rand-msg').value.trim();
+  if (!v) return;
+  _randMsgs.push(v);
+  document.getElementById('new-rand-msg').value = '';
+  renderRandMsgs();
+}}
+
+function removeRandMsg(i) {{
+  _randMsgs.splice(i, 1);
+  renderRandMsgs();
+}}
+
+function addKeyword() {{
+  var kw   = document.getElementById('new-kw').value.trim();
+  var resp = document.getElementById('new-resp').value.trim();
+  if (!kw || !resp) return;
+  _kwTriggers[kw] = resp;
+  document.getElementById('new-kw').value   = '';
+  document.getElementById('new-resp').value = '';
+  renderKeywords();
+}}
+
+function removeKeyword(kw) {{
+  delete _kwTriggers[kw];
+  renderKeywords();
+}}
+
+function authBot() {{
+  saveBotSettings(function() {{
+    fetch('/bot_auth_url').then(r => r.json()).then(function(d) {{
+      if (d.ok) {{
+        window.open(d.url, '_blank');
+        document.getElementById('auth-status').innerHTML = '&#9203; Waiting\u2026 complete auth in the new tab then check back here.';
+      }} else {{
+        document.getElementById('auth-status').innerHTML = '<span style="color:#ff6666">&#10005; ' + _escH(d.msg) + '</span>';
+      }}
+    }});
+  }});
+}}
+
+function saveBotSettings(cb) {{
+  var data = {{
+    enabled:                 document.getElementById('bot-enabled').checked ? '1' : '0',
+    oauth_client_id:         document.getElementById('bot-client-id').value,
+    oauth_client_secret:     document.getElementById('bot-client-secret').value,
+    headless_message:        document.getElementById('bot-headless').value,
+    random_interval_minutes: document.getElementById('bot-interval').value,
+    random_messages:         JSON.stringify(_randMsgs),
+    keyword_triggers:        JSON.stringify(_kwTriggers),
+  }};
+  var body = Object.keys(data).map(function(k) {{
+    return encodeURIComponent(k) + '=' + encodeURIComponent(data[k]);
+  }}).join('&');
+  fetch('/bot_config', {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}}, body:body}})
+  .then(r => r.json()).then(function(d) {{
+    var el = document.getElementById('bot-save-msg');
+    el.textContent = d.ok ? '\\u2713 Saved' : '\\u2717 ' + d.msg;
+    setTimeout(function() {{ el.textContent = ''; }}, 3000);
+    if (cb) cb();
+  }});
+}}
+
+function updateBotStatus() {{
+  fetch('/bot_status').then(r => r.json()).then(function(b) {{
+    var dot    = document.getElementById('bot-dot');
+    var txt    = document.getElementById('bot-status-txt');
+    var mEl    = document.getElementById('bot-msgs-sent');
+    var aEl    = document.getElementById('auth-status');
+    if (b.running) {{
+      dot.className = 'bot-dot bot-live';
+      txt.textContent = '\\u25cf Bot active';
+      mEl.textContent = b.messages_sent > 0 ? b.messages_sent + ' msgs sent' : '';
+    }} else {{
+      dot.className = 'bot-dot';
+      txt.textContent = b.error ? '\\u2717 ' + b.error : (b.authorized ? 'Authorized \\u00b7 not running' : 'Not authorized');
+      mEl.textContent = '';
+    }}
+    if (b.authorized && aEl && !aEl.textContent.includes('Waiting')) {{
+      aEl.innerHTML = '<span style="color:#80ff80">\\u2713 Authorized</span>';
+    }}
+  }}).catch(function() {{}});
+}}
+
+setInterval(updateBotStatus, 4000);
+renderRandMsgs();
+renderKeywords();
+updateBotStatus();"""
+
+
 def _render_dashboard():
     cfg        = _load_cfg()
     ip         = _get_local_ip()
@@ -738,6 +1273,15 @@ def _render_dashboard():
         _qual_slider_html('sharpness',  'Sharpness',    0, 200, round(q['sharpness']  * 100)),
         _qual_slider_html('zoom',       'Zoom (x)',     10,  40, round(q['zoom']       * 10)),
     ])
+    bot_cfg          = _get_bot_cfg(cfg)
+    authorized       = bool(_load_token())
+    auth_status_html = (
+        '<span style="color:#80ff80">&#10003; Authorized</span>' if authorized
+        else '<span style="color:#888">Not yet authorized</span>'
+    )
+    redirect_uri   = _build_oauth_redirect_uri()
+    bot_panel_html = _build_bot_panel_html(bot_cfg, auth_status_html, redirect_uri)
+    bot_panel_js   = _build_bot_panel_js(bot_cfg)
     return _DASHBOARD_HTML.format(
         ip=ip, port=_PORT,
         stream_key=stream_key,
@@ -745,6 +1289,8 @@ def _render_dashboard():
         otr_opts=_otr_options(otr_url),
         cam_names_json=cam_names,
         sliders_html=sliders_html,
+        bot_panel_html=bot_panel_html,
+        bot_panel_js=bot_panel_js,
     ).encode()
 
 
@@ -762,6 +1308,48 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_preview()
         elif path == '/status':
             self._serve_status()
+        elif path == '/bot_status':
+            with _bot_status_lock:
+                bs = dict(_bot_status)
+            bs['authorized'] = bool(_load_token())
+            self._json(bs)
+        elif path == '/bot_auth_url':
+            bot_cfg = _get_bot_cfg()
+            if not bot_cfg.get('oauth_client_id') or not bot_cfg.get('oauth_client_secret'):
+                self._json({'ok': False, 'msg': 'Save Client ID and Secret first'})
+                return
+            self._json({'ok': True, 'url': _build_auth_url(bot_cfg)})
+        elif path == '/oauth2callback':
+            qs     = self.path.split('?', 1)[1] if '?' in self.path else ''
+            qp     = parse_qs(qs)
+            code   = qp.get('code', [''])[0]
+            err    = qp.get('error', [''])[0]
+            if err or not code:
+                msg = err or 'No code received'
+                self._send(200,
+                    f'<html><body style="background:#0d0d0d;color:#ff6666;font-family:monospace;padding:40px;text-align:center">'
+                    f'<h1>&#10005; Authorization Failed</h1><p>{html.escape(msg)}</p>'
+                    f'<p>Close this tab and try again.</p></body></html>'.encode(),
+                    'text/html; charset=utf-8')
+                return
+            ok, msg = _exchange_code(_get_bot_cfg(), code)
+            if ok:
+                with _bot_status_lock:
+                    _bot_status['authorized'] = True
+                body = (
+                    b'<html><body style="background:#0d0d0d;color:#80ff80;font-family:monospace;padding:40px;text-align:center">'
+                    b'<h1>&#10003; Bot Authorized!</h1>'
+                    b'<p>Token saved. You can close this tab and return to YouTube Studio.</p>'
+                    b'<script>setTimeout(function(){window.close()},3000)</script>'
+                    b'</body></html>'
+                )
+            else:
+                body = (
+                    f'<html><body style="background:#0d0d0d;color:#ff6666;font-family:monospace;padding:40px;text-align:center">'
+                    f'<h1>&#10005; Authorization Failed</h1><p>{html.escape(msg)}</p>'
+                    f'<p>Close this tab and try again.</p></body></html>'
+                ).encode()
+            self._send(200, body, 'text/html; charset=utf-8')
         else:
             self._send(404, b'Not found', 'text/plain')
 
@@ -811,6 +1399,32 @@ class _Handler(BaseHTTPRequestHandler):
                 start_preview(cam)
             log.info('Quality updated → %s', cfg['quality'])
             self._json({'ok': True, 'quality': cfg['quality']})
+
+        elif path == '/bot_config':
+            bot_cfg = _get_bot_cfg()
+            bot_cfg['enabled']                 = get('enabled') == '1'
+            new_id  = get('oauth_client_id').strip()
+            new_sec = get('oauth_client_secret').strip()
+            if new_id:
+                bot_cfg['oauth_client_id']     = new_id
+            if new_sec:
+                bot_cfg['oauth_client_secret'] = new_sec
+            bot_cfg['headless_message']        = get('headless_message')
+            try:
+                bot_cfg['random_interval_minutes'] = max(0, int(float(get('random_interval_minutes', '10'))))
+            except ValueError:
+                pass
+            try:
+                bot_cfg['random_messages']  = json.loads(get('random_messages', '[]'))
+            except (ValueError, json.JSONDecodeError):
+                pass
+            try:
+                bot_cfg['keyword_triggers'] = json.loads(get('keyword_triggers', '{}'))
+            except (ValueError, json.JSONDecodeError):
+                pass
+            _save_bot_cfg(bot_cfg)
+            log.info('Bot config saved (enabled=%s)', bot_cfg['enabled'])
+            self._json({'ok': True})
 
         elif path == '/settings':
             cfg = _load_cfg()
