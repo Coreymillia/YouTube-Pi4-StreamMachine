@@ -1,0 +1,16 @@
+[Unit]
+Description=YouTube Studio - Pi 4 live streaming daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/coreymillia/youtube-studio/youtube_studio.py
+WorkingDirectory=/home/coreymillia/youtube-studio
+User=coreymillia
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
