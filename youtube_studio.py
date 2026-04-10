@@ -463,6 +463,47 @@ def stop_stream():
         _terminate(_stream_proc_libcam)
         _terminate(_stream_proc_main)
 
+def switch_stream_camera(cam_idx):
+    """Hot-swap the camera mid-stream by killing and relaunching just the encode pipeline."""
+    global _stream_proc_main, _stream_proc_libcam, _stream_thread
+    if not _stream_state['running']:
+        return False, 'No stream is running.'
+    cfg = _load_cfg()
+    stream_key = cfg.get('youtube_stream_key', '').strip()
+    if not stream_key:
+        return False, 'No stream key.'
+    cam_idx = max(0, min(cam_idx, len(_CAMERAS) - 1))
+    cam = dict(_CAMERAS[cam_idx])
+    if cam['type'] == 'usb':
+        cam['device'] = _find_usb_video_device()
+    otr_url  = cfg.get('otr_station_url', _OTR_DEFAULT).strip() or _OTR_DEFAULT
+    quality  = _get_quality(cfg)
+    rtmp_url = f'{_YT_RTMP_BASE}/{stream_key}'
+    # Kill current encode pipeline; the stream worker loop will relaunch with new cam
+    with _stream_lock:
+        _terminate(_stream_proc_libcam)
+        _terminate(_stream_proc_main)
+    # Wait briefly for the worker loop to notice the exit, then start new pipeline directly
+    time.sleep(1)
+    libcam_cmd, ffmpeg_cmd = _build_stream_cmds(cam, rtmp_url, otr_url, quality)
+    if libcam_cmd:
+        lc = subprocess.Popen(libcam_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        ff = subprocess.Popen(ffmpeg_cmd, stdin=lc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        lc.stdout.close()
+    else:
+        lc = None
+        ff = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with _stream_lock:
+        _stream_proc_libcam = lc
+        _stream_proc_main   = ff
+        _stream_state['cam_name'] = cam['name']
+        _stream_state['retries']  = 0
+        _stream_state['error']    = ''
+    # Also switch the preview
+    start_preview(cam)
+    log.info('Camera switched mid-stream → %s', cam['name'])
+    return True, f'Switched to {cam["name"]}'
+
 # ── YouTube Live Chat Bot ─────────────────────────────────────────────────────
 _TOKEN_PATH      = os.path.join(_PROJECT_DIR, 'token.json')
 _DEVICE_CODE_URL = 'https://oauth2.googleapis.com/device/code'
@@ -902,9 +943,10 @@ details[open]>summary{{color:#aaa}}
     <label>Audio (OTR Radio)</label>
     <select id="otr-sel">{otr_opts}</select>
 
-    <div style="margin-top:12px">
+    <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">
       <button class="btn btn-green" onclick="startStream()">&#9654; Start Stream</button>
       <button class="btn btn-red"   onclick="stopStream()">&#9632; Stop Stream</button>
+      <button class="btn btn-blue"  id="switch-cam-btn" onclick="switchCamera()" style="display:none">&#8635; Switch Camera</button>
     </div>
     <div id="stream-err" class="err"></div>
 
@@ -992,6 +1034,26 @@ function toggleGrid() {{
   }});
 }}
 
+function switchCamera() {{
+  var idx = camSel.value;
+  var btn = document.getElementById('switch-cam-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Switching…';
+  fetch('/switch', {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+    body:'cam_idx='+idx}})
+  .then(r=>r.json()).then(function(d) {{
+    document.getElementById('stream-err').textContent = d.ok ? '' : d.msg;
+    // Preview follows the new camera automatically
+    prevImg.src = '/preview?cam=' + idx + '&t=' + Date.now();
+    prevLbl.textContent = camNames[idx] + ' · 5fps';
+    btn.disabled = false;
+    btn.textContent = '↺ Switch Camera';
+  }}).catch(function() {{
+    btn.disabled = false;
+    btn.textContent = '↺ Switch Camera';
+  }});
+}}
+
 function startStream() {{
   var idx = camSel.value;
   var otr = otrSel.value;
@@ -1033,11 +1095,13 @@ function updateStatus() {{
         + String(Math.floor((u%3600)/60)).padStart(2,'0') + ':'
         + String(u%60).padStart(2,'0');
       ret.textContent = s.retries > 0 ? '  retries:'+s.retries : '';
+      document.getElementById('switch-cam-btn').style.display = '';
     }} else {{
       dot.className = '';
       txt.textContent = s.error ? '✗ ' + s.error : 'Idle';
       upt.textContent = '';
       ret.textContent = '';
+      document.getElementById('switch-cam-btn').style.display = 'none';
     }}
     // Auto-select best available camera on first load
     if (!window._camInitDone && s.available_cams && s.available_cams.length > 0) {{
@@ -1451,6 +1515,14 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == '/stop':
             stop_stream()
             self._json({'ok': True, 'msg': 'Stopping…'})
+
+        elif path == '/switch':
+            try:
+                cam_idx = int(get('cam_idx', '0'))
+            except ValueError:
+                cam_idx = 0
+            ok, msg = switch_stream_camera(cam_idx)
+            self._json({'ok': ok, 'msg': msg})
 
         elif path == '/quality':
             cfg = _load_cfg()
