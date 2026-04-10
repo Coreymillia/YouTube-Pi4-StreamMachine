@@ -465,7 +465,7 @@ def stop_stream():
 
 # ── YouTube Live Chat Bot ─────────────────────────────────────────────────────
 _TOKEN_PATH      = os.path.join(_PROJECT_DIR, 'token.json')
-_OAUTH_AUTH_URL  = 'https://accounts.google.com/o/oauth2/v2/auth'
+_DEVICE_CODE_URL = 'https://oauth2.googleapis.com/device/code'
 _OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 _YT_API          = 'https://www.googleapis.com/youtube/v3'
 _OAUTH_SCOPE     = 'https://www.googleapis.com/auth/youtube'
@@ -537,37 +537,100 @@ def _get_access_token(bot_cfg):
     return tok.get('access_token') if tok else None
 
 
-def _build_oauth_redirect_uri():
-    return f'http://{_get_local_ip()}:{_PORT}/oauth2callback'
+# ── Device Authorization Flow (headless OAuth, no redirect URI needed) ────────
+_dev_auth_lock  = threading.Lock()
+_dev_auth_state = {
+    'pending':          False,
+    'user_code':        '',
+    'verification_url': '',
+    'expires_at':       0,
+    'interval':         5,
+    'error':            '',
+}
 
 
-def _build_auth_url(bot_cfg):
-    return _OAUTH_AUTH_URL + '?' + urlencode({
-        'client_id':     bot_cfg['oauth_client_id'],
-        'redirect_uri':  _build_oauth_redirect_uri(),
-        'response_type': 'code',
-        'scope':         _OAUTH_SCOPE,
-        'access_type':   'offline',
-        'prompt':        'consent',
-    })
-
-
-def _exchange_code(bot_cfg, code):
+def _start_device_auth(bot_cfg):
+    """Request a device/user code from Google and begin background polling."""
     try:
-        r = _http.post(_OAUTH_TOKEN_URL, data={
-            'client_id':     bot_cfg['oauth_client_id'],
-            'client_secret': bot_cfg['oauth_client_secret'],
-            'code':          code,
-            'redirect_uri':  _build_oauth_redirect_uri(),
-            'grant_type':    'authorization_code',
+        r = _http.post(_DEVICE_CODE_URL, data={
+            'client_id': bot_cfg['oauth_client_id'],
+            'scope':     _OAUTH_SCOPE,
         }, timeout=10)
         r.raise_for_status()
         data = r.json()
-        data['expires_at'] = time.time() + data.get('expires_in', 3600) - 60
-        _save_token(data)
-        return True, 'Bot authorized successfully!'
+        with _dev_auth_lock:
+            _dev_auth_state.update({
+                'pending':          True,
+                '_device_code':     data['device_code'],
+                'user_code':        data['user_code'],
+                'verification_url': data.get('verification_url', 'https://www.google.com/device'),
+                'expires_at':       time.time() + data.get('expires_in', 1800),
+                'interval':         data.get('interval', 5),
+                'error':            '',
+            })
+        threading.Thread(target=_poll_device_auth, args=(bot_cfg,), daemon=True).start()
+        return True, data['user_code'], data.get('verification_url', 'https://www.google.com/device')
     except Exception as exc:
-        return False, str(exc)
+        log.error('ChatBot: device auth start failed: %s', exc)
+        return False, '', str(exc)
+
+
+def _poll_device_auth(bot_cfg):
+    """Poll Google token endpoint until user approves or request expires."""
+    while True:
+        with _dev_auth_lock:
+            if not _dev_auth_state['pending']:
+                return
+            if time.time() >= _dev_auth_state['expires_at']:
+                _dev_auth_state['pending'] = False
+                _dev_auth_state['error']   = 'Authorization timed out — start again'
+                return
+            device_code = _dev_auth_state['_device_code']
+            interval    = _dev_auth_state['interval']
+
+        time.sleep(interval)
+
+        try:
+            r = _http.post(_OAUTH_TOKEN_URL, data={
+                'client_id':     bot_cfg['oauth_client_id'],
+                'client_secret': bot_cfg['oauth_client_secret'],
+                'device_code':   device_code,
+                'grant_type':    'urn:ietf:params:oauth:grant-type:device_code',
+            }, timeout=10)
+            data = r.json()
+            err = data.get('error', '')
+
+            if err == 'authorization_pending':
+                continue
+            elif err == 'slow_down':
+                with _dev_auth_lock:
+                    _dev_auth_state['interval'] = min(interval + 5, 30)
+                continue
+            elif err == 'access_denied':
+                with _dev_auth_lock:
+                    _dev_auth_state['pending'] = False
+                    _dev_auth_state['error']   = 'Access denied — try again'
+                return
+            elif err:
+                with _dev_auth_lock:
+                    _dev_auth_state['pending'] = False
+                    _dev_auth_state['error']   = err
+                return
+
+            # Success
+            data['expires_at'] = time.time() + data.get('expires_in', 3600) - 60
+            _save_token(data)
+            with _dev_auth_lock:
+                _dev_auth_state['pending'] = False
+                _dev_auth_state['error']   = ''
+            with _bot_status_lock:
+                _bot_status['authorized'] = True
+            log.info('ChatBot: device auth complete — token saved')
+            return
+
+        except Exception as exc:
+            log.error('ChatBot: device auth poll error: %s', exc)
+            time.sleep(5)
 
 
 # ── Chat Bot class ────────────────────────────────────────────────────────────
@@ -1037,10 +1100,10 @@ def _qual_slider_html(id_, label, mn, mx, default):
 
 
 def _build_bot_panel_html(bot_cfg, auth_status_html, redirect_uri):
-    checked         = 'checked' if bot_cfg.get('enabled') else ''
-    client_id       = html.escape(bot_cfg.get('oauth_client_id', ''))
-    headless_msg    = html.escape(bot_cfg.get('headless_message', ''))
-    rand_interval   = int(bot_cfg.get('random_interval_minutes', 10))
+    checked       = 'checked' if bot_cfg.get('enabled') else ''
+    client_id     = html.escape(bot_cfg.get('oauth_client_id', ''))
+    headless_msg  = html.escape(bot_cfg.get('headless_message', ''))
+    rand_interval = int(bot_cfg.get('random_interval_minutes', 10))
     return f"""
 <div class="layout" style="padding-top:0">
   <div class="panel" style="flex:1;min-width:100%">
@@ -1061,24 +1124,33 @@ def _build_bot_panel_html(bot_cfg, auth_status_html, redirect_uri):
       <!-- OAuth + headless message + interval -->
       <div style="flex:1;min-width:260px">
         <details id="oauth-section">
-          <summary>&#9658; OAuth2 Setup (Google API)</summary>
+          <summary>&#9658; Google API Setup</summary>
           <div style="margin-top:10px;padding:10px;background:#0d0d0d;border-radius:4px">
-            <div class="hint" style="margin-bottom:8px;line-height:1.6">
-              1. Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:#4a9eff">Google Cloud Console</a>
-              &rarr; Create OAuth 2.0 Client ID (Web application).<br>
-              2. Enable the <strong style="color:#ccc">YouTube Data API v3</strong>.<br>
-              3. Add <code style="color:#ff9900;font-size:11px">{html.escape(redirect_uri)}</code> as an authorized redirect URI.<br>
-              4. Paste credentials below and click Authorize.
+            <div class="hint" style="margin-bottom:8px;line-height:1.8">
+              1. <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:#4a9eff">Google Cloud Console</a>
+              &rarr; Create OAuth 2.0 Client ID<br>
+              &nbsp;&nbsp;&nbsp;&nbsp;&#9656; Credentials type: <strong style="color:#ffcc44">TV and Limited Input devices</strong><br>
+              2. Enable <strong style="color:#ccc">YouTube Data API v3</strong> on the same project<br>
+              3. Paste Client ID &amp; Secret below, click Save, then Start Authorization<br>
+              4. On <strong>any phone or laptop</strong>, go to the URL shown and enter the code
             </div>
             <label>Client ID</label>
             <input type="text" id="bot-client-id" value="{client_id}" placeholder="...apps.googleusercontent.com">
             <label style="margin-top:8px">Client Secret</label>
             <input type="password" id="bot-client-secret" placeholder="leave blank to keep existing">
             <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-              <button class="btn btn-grey" onclick="saveBotSettings()" style="margin:0">&#128190; Save</button>
-              <button class="btn btn-blue" id="auth-btn" onclick="authBot()" style="margin:0">&#128273; Authorize Bot</button>
-              <span id="auth-status" style="font-size:12px">{auth_status_html}</span>
+              <button class="btn btn-grey" onclick="saveBotSettings()" style="margin:0">&#128190; Save Credentials</button>
+              <button class="btn btn-blue" id="auth-btn" onclick="startDeviceAuth()" style="margin:0">&#128273; Start Authorization</button>
             </div>
+            <!-- Device auth code display (hidden until auth starts) -->
+            <div id="device-auth-box" style="display:none;margin-top:12px;padding:12px;background:#1a2a1a;border:1px solid #2a5a2a;border-radius:4px;text-align:center">
+              <div style="color:#888;font-size:11px;margin-bottom:6px">Go to this URL on any device:</div>
+              <a id="dev-verify-url" href="#" target="_blank" style="color:#4a9eff;font-size:13px"></a>
+              <div style="margin:10px 0;color:#888;font-size:11px">Enter this code:</div>
+              <div id="dev-user-code" style="font-size:28px;font-weight:bold;letter-spacing:6px;color:#80ff80;font-family:monospace"></div>
+              <div id="dev-auth-waiting" style="margin-top:8px;color:#888;font-size:11px">&#9203; Waiting for you to approve&hellip;</div>
+            </div>
+            <div id="auth-status" style="margin-top:8px;font-size:12px">{auth_status_html}</div>
           </div>
         </details>
 
@@ -1197,15 +1269,22 @@ function removeKeyword(kw) {{
   renderKeywords();
 }}
 
-function authBot() {{
+function startDeviceAuth() {{
   saveBotSettings(function() {{
-    fetch('/bot_auth_url').then(r => r.json()).then(function(d) {{
-      if (d.ok) {{
-        window.open(d.url, '_blank');
-        document.getElementById('auth-status').innerHTML = '&#9203; Waiting\u2026 complete auth in the new tab then check back here.';
-      }} else {{
+    fetch('/bot_auth_start', {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}}, body:''}})
+    .then(r => r.json()).then(function(d) {{
+      if (!d.ok) {{
         document.getElementById('auth-status').innerHTML = '<span style="color:#ff6666">&#10005; ' + _escH(d.msg) + '</span>';
+        return;
       }}
+      var box = document.getElementById('device-auth-box');
+      var urlEl = document.getElementById('dev-verify-url');
+      var codeEl = document.getElementById('dev-user-code');
+      urlEl.textContent = d.verification_url;
+      urlEl.href        = d.verification_url;
+      codeEl.textContent = d.user_code;
+      box.style.display = 'block';
+      document.getElementById('auth-status').innerHTML = '';
     }});
   }});
 }}
@@ -1234,20 +1313,40 @@ function saveBotSettings(cb) {{
 
 function updateBotStatus() {{
   fetch('/bot_status').then(r => r.json()).then(function(b) {{
-    var dot    = document.getElementById('bot-dot');
-    var txt    = document.getElementById('bot-status-txt');
-    var mEl    = document.getElementById('bot-msgs-sent');
-    var aEl    = document.getElementById('auth-status');
+    var dot  = document.getElementById('bot-dot');
+    var txt  = document.getElementById('bot-status-txt');
+    var mEl  = document.getElementById('bot-msgs-sent');
+    var aEl  = document.getElementById('auth-status');
+    var box  = document.getElementById('device-auth-box');
+    var wait = document.getElementById('dev-auth-waiting');
+
     if (b.running) {{
-      dot.className = 'bot-dot bot-live';
+      dot.className   = 'bot-dot bot-live';
       txt.textContent = '\\u25cf Bot active';
       mEl.textContent = b.messages_sent > 0 ? b.messages_sent + ' msgs sent' : '';
     }} else {{
-      dot.className = 'bot-dot';
-      txt.textContent = b.error ? '\\u2717 ' + b.error : (b.authorized ? 'Authorized \\u00b7 not running' : 'Not authorized');
+      dot.className   = 'bot-dot';
+      txt.textContent = b.error ? '\\u2717 ' + b.error
+                      : (b.authorized ? 'Authorized \\u00b7 starts when stream goes live' : 'Not authorized');
       mEl.textContent = '';
     }}
-    if (b.authorized && aEl && !aEl.textContent.includes('Waiting')) {{
+
+    // Device auth polling
+    if (b.dev_auth) {{
+      if (b.dev_auth.pending && box) {{
+        box.style.display = 'block';
+        if (wait) wait.textContent = '\\u23f3 Waiting for you to approve\\u2026';
+      }} else if (!b.dev_auth.pending && box && box.style.display !== 'none') {{
+        if (b.dev_auth.error) {{
+          if (wait) wait.innerHTML = '<span style="color:#ff6666">\\u2717 ' + _escH(b.dev_auth.error) + '</span>';
+        }} else {{
+          box.style.display = 'none';
+          if (aEl) aEl.innerHTML = '<span style="color:#80ff80">\\u2713 Authorized!</span>';
+        }}
+      }}
+    }}
+
+    if (b.authorized && aEl && !b.dev_auth.pending) {{
       aEl.innerHTML = '<span style="color:#80ff80">\\u2713 Authorized</span>';
     }}
   }}).catch(function() {{}});
@@ -1279,8 +1378,7 @@ def _render_dashboard():
         '<span style="color:#80ff80">&#10003; Authorized</span>' if authorized
         else '<span style="color:#888">Not yet authorized</span>'
     )
-    redirect_uri   = _build_oauth_redirect_uri()
-    bot_panel_html = _build_bot_panel_html(bot_cfg, auth_status_html, redirect_uri)
+    bot_panel_html = _build_bot_panel_html(bot_cfg, auth_status_html, '')
     bot_panel_js   = _build_bot_panel_js(bot_cfg)
     return _DASHBOARD_HTML.format(
         ip=ip, port=_PORT,
@@ -1312,44 +1410,23 @@ class _Handler(BaseHTTPRequestHandler):
             with _bot_status_lock:
                 bs = dict(_bot_status)
             bs['authorized'] = bool(_load_token())
+            with _dev_auth_lock:
+                bs['dev_auth'] = {
+                    'pending':          _dev_auth_state['pending'],
+                    'user_code':        _dev_auth_state['user_code'],
+                    'verification_url': _dev_auth_state['verification_url'],
+                    'error':            _dev_auth_state['error'],
+                }
             self._json(bs)
-        elif path == '/bot_auth_url':
-            bot_cfg = _get_bot_cfg()
-            if not bot_cfg.get('oauth_client_id') or not bot_cfg.get('oauth_client_secret'):
-                self._json({'ok': False, 'msg': 'Save Client ID and Secret first'})
-                return
-            self._json({'ok': True, 'url': _build_auth_url(bot_cfg)})
         elif path == '/oauth2callback':
-            qs     = self.path.split('?', 1)[1] if '?' in self.path else ''
-            qp     = parse_qs(qs)
-            code   = qp.get('code', [''])[0]
-            err    = qp.get('error', [''])[0]
-            if err or not code:
-                msg = err or 'No code received'
-                self._send(200,
-                    f'<html><body style="background:#0d0d0d;color:#ff6666;font-family:monospace;padding:40px;text-align:center">'
-                    f'<h1>&#10005; Authorization Failed</h1><p>{html.escape(msg)}</p>'
-                    f'<p>Close this tab and try again.</p></body></html>'.encode(),
-                    'text/html; charset=utf-8')
-                return
-            ok, msg = _exchange_code(_get_bot_cfg(), code)
-            if ok:
-                with _bot_status_lock:
-                    _bot_status['authorized'] = True
-                body = (
-                    b'<html><body style="background:#0d0d0d;color:#80ff80;font-family:monospace;padding:40px;text-align:center">'
-                    b'<h1>&#10003; Bot Authorized!</h1>'
-                    b'<p>Token saved. You can close this tab and return to YouTube Studio.</p>'
-                    b'<script>setTimeout(function(){window.close()},3000)</script>'
-                    b'</body></html>'
-                )
-            else:
-                body = (
-                    f'<html><body style="background:#0d0d0d;color:#ff6666;font-family:monospace;padding:40px;text-align:center">'
-                    f'<h1>&#10005; Authorization Failed</h1><p>{html.escape(msg)}</p>'
-                    f'<p>Close this tab and try again.</p></body></html>'
-                ).encode()
-            self._send(200, body, 'text/html; charset=utf-8')
+            # No longer used — kept so old bookmarks don't 404
+            self._send(200,
+                b'<html><body style="background:#0d0d0d;color:#aaa;font-family:monospace;padding:40px;text-align:center">'
+                b'<h1>Redirect URI not needed</h1>'
+                b'<p>This project now uses the Device Authorization flow.</p>'
+                b'<p>Return to YouTube Studio and use the "Start Authorization" button.</p>'
+                b'</body></html>',
+                'text/html; charset=utf-8')
         else:
             self._send(404, b'Not found', 'text/plain')
 
@@ -1399,6 +1476,17 @@ class _Handler(BaseHTTPRequestHandler):
                 start_preview(cam)
             log.info('Quality updated → %s', cfg['quality'])
             self._json({'ok': True, 'quality': cfg['quality']})
+
+        elif path == '/bot_auth_start':
+            bot_cfg = _get_bot_cfg()
+            if not bot_cfg.get('oauth_client_id') or not bot_cfg.get('oauth_client_secret'):
+                self._json({'ok': False, 'msg': 'Save Client ID and Secret first'})
+                return
+            ok, user_code, verify_url = _start_device_auth(bot_cfg)
+            if ok:
+                self._json({'ok': True, 'user_code': user_code, 'verification_url': verify_url})
+            else:
+                self._json({'ok': False, 'msg': user_code or verify_url})
 
         elif path == '/bot_config':
             bot_cfg = _get_bot_cfg()
