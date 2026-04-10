@@ -158,6 +158,21 @@ def _get_local_ip():
 
 _available_cams = []   # list of indices detected at startup
 
+def _find_usb_video_device():
+    """Return the first /dev/videoN whose bus info reports 'usb'."""
+    import glob as _g
+    for dev in sorted(_g.glob('/dev/video*')):
+        try:
+            out = subprocess.check_output(
+                ['v4l2-ctl', '-d', dev, '--info'],
+                stderr=subprocess.DEVNULL, text=True, timeout=2,
+            )
+            if 'usb' in out.lower():
+                return dev
+        except Exception:
+            continue
+    return '/dev/video0'
+
 def _detect_cameras():
     """Returns list of available camera indices."""
     available = []
@@ -186,19 +201,6 @@ def _detect_cameras():
     except Exception:
         pass
     return available
-    """Return the first /dev/videoN whose bus info reports 'usb'."""
-    import glob as _g
-    for dev in sorted(_g.glob('/dev/video*')):
-        try:
-            out = subprocess.check_output(
-                ['v4l2-ctl', '-d', dev, '--info'],
-                stderr=subprocess.DEVNULL, text=True, timeout=2,
-            )
-            if 'usb' in out.lower():
-                return dev
-        except Exception:
-            continue
-    return '/dev/video0'
 
 def _terminate(proc):
     if proc and proc.poll() is None:
@@ -387,10 +389,10 @@ def _stream_worker(cam, rtmp_url, otr_url, quality):
         libcam_cmd, ffmpeg_cmd = _build_stream_cmds(cam, rtmp_url, otr_url, quality)
         if libcam_cmd:
             lc = subprocess.Popen(libcam_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            ff = subprocess.Popen(ffmpeg_cmd, stdin=lc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ff = subprocess.Popen(ffmpeg_cmd, stdin=lc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             lc.stdout.close()
             return lc, ff
-        return None, subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return None, subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     lc, ff = _launch()
     with _stream_lock:
@@ -409,6 +411,14 @@ def _stream_worker(cam, rtmp_url, otr_url, quality):
     while not _stream_stop_evt.is_set():
         time.sleep(2)
         if ff.poll() is not None and not _stream_stop_evt.is_set():
+            # Capture last lines of ffmpeg stderr for diagnostics
+            try:
+                err_out = (ff.stderr.read() or b'').decode(errors='replace')
+                last_err = ' | '.join(l.strip() for l in err_out.splitlines() if l.strip())[-300:]
+                if last_err:
+                    log.warning('ffmpeg exit output: %s', last_err)
+            except Exception:
+                pass
             retries += 1
             with _stream_lock:
                 _stream_state['retries'] = retries
