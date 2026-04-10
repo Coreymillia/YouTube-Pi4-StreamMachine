@@ -64,12 +64,15 @@ def _otr_name(url):
 #   saturation :  0.0 → 2.0    (1.0  = no change)
 #   sharpness  :  0.0 → 2.0    (1.0  = no change)
 #   zoom       :  1.0 → 4.0    (1.0  = full sensor, 2.0 = 2× center crop)
+#   awb        :  string rpicam-vid --awb mode (auto, tungsten, fluorescent, etc.)
+_AWB_MODES = ['auto', 'tungsten', 'fluorescent', 'indoor', 'daylight', 'cloudy', 'custom']
 _QUALITY_DEFAULTS = {
     'brightness': 0.0,
     'contrast':   1.0,
     'saturation': 1.0,
     'sharpness':  1.0,
     'zoom':       1.0,
+    'awb':        'auto',
 }
 
 def _get_quality(cfg):
@@ -81,6 +84,8 @@ def _get_quality(cfg):
     q['saturation'] = max(0.0,  min(2.0,  float(q['saturation'])))
     q['sharpness']  = max(0.0,  min(2.0,  float(q['sharpness'])))
     q['zoom']       = max(1.0,  min(4.0,  float(q['zoom'])))
+    if q.get('awb') not in _AWB_MODES:
+        q['awb'] = 'auto'
     return q
 
 def _csi_quality_args(q):
@@ -90,6 +95,7 @@ def _csi_quality_args(q):
         '--contrast',   f"{q['contrast']:.3f}",
         '--saturation', f"{q['saturation']:.3f}",
         '--sharpness',  f"{q['sharpness']:.3f}",
+        '--awb',        q.get('awb', 'auto'),
     ]
     z = q['zoom']
     if z > 1.01:
@@ -1119,6 +1125,8 @@ function updateStatus() {{
       setSlider('saturation', Math.round(q.saturation * 100));
       setSlider('sharpness',  Math.round(q.sharpness  * 100));
       setSlider('zoom',       Math.round(q.zoom       * 10));
+      var awbEl = document.getElementById('sl-awb');
+      if (awbEl && q.awb) awbEl.value = q.awb;
     }}
     document.getElementById('footer').textContent =
       'YouTube Studio · http://{ip}:{port}' + (s.running ? '  ·  streaming to YouTube' : '');
@@ -1139,8 +1147,9 @@ function applyQuality() {{
   var sa = parseInt(document.getElementById('sl-saturation').value);
   var sh = parseInt(document.getElementById('sl-sharpness').value);
   var z  = parseInt(document.getElementById('sl-zoom').value);
+  var awb = document.getElementById('sl-awb').value;
   fetch('/quality', {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
-    body: 'brightness='+(b/100)+'&contrast='+(c/100)+'&saturation='+(sa/100)+'&sharpness='+(sh/100)+'&zoom='+(z/10)
+    body: 'brightness='+(b/100)+'&contrast='+(c/100)+'&saturation='+(sa/100)+'&sharpness='+(sh/100)+'&zoom='+(z/10)+'&awb='+encodeURIComponent(awb)
   }}).then(r=>r.json()).then(d=>{{
     if (!d.ok) alert('Quality error: ' + d.msg);
   }});
@@ -1429,12 +1438,20 @@ def _render_dashboard():
     otr_url    = cfg.get('otr_station_url', _OTR_DEFAULT)
     cam_names  = json.dumps({str(i): c['short'] for i, c in enumerate(_CAMERAS)})
     q          = _get_quality(cfg)
+    awb_opts   = ''.join(
+        f'<option value="{m}"{" selected" if m == q.get("awb","auto") else ""}>'
+        f'{m.capitalize()}</option>'
+        for m in _AWB_MODES
+    )
     sliders_html = ''.join([
         _qual_slider_html('brightness', 'Brightness', -100, 100, round(q['brightness'] * 100)),
         _qual_slider_html('contrast',   'Contrast',     0, 200, round(q['contrast']   * 100)),
         _qual_slider_html('saturation', 'Saturation',   0, 200, round(q['saturation'] * 100)),
         _qual_slider_html('sharpness',  'Sharpness',    0, 200, round(q['sharpness']  * 100)),
         _qual_slider_html('zoom',       'Zoom (x)',     10,  40, round(q['zoom']       * 10)),
+        f'<div class="slider-row"><label>White Bal.</label>'
+        f'<select id="sl-awb" style="flex:1;background:#1e1e1e;color:#eee;border:1px solid #3a3a3a;padding:4px 6px;border-radius:4px">'
+        f'{awb_opts}</select></div>',
     ])
     bot_cfg          = _get_bot_cfg(cfg)
     authorized       = bool(_load_token())
@@ -1536,6 +1553,9 @@ class _Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._json({'ok': False, 'msg': str(exc)})
                 return
+            awb = get('awb', q.get('awb', 'auto'))
+            if awb in _AWB_MODES:
+                q['awb'] = awb
             cfg['quality'] = _get_quality({'quality': q})  # clamp
             _save_cfg(cfg)
             # Restart preview with new quality so sliders update the live feed
