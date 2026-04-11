@@ -49,8 +49,11 @@ _OTR_STATIONS = [
     ('Science Fiction',   'http://149.255.60.194:8110/stream'),
 ]
 _OTR_DEFAULT = 'http://149.255.60.195:8256/stream'
+_OTR_SILENT  = '__silent__'
 
 def _otr_name(url):
+    if url == _OTR_SILENT:
+        return 'No Audio'
     for name, u in _OTR_STATIONS:
         if u == url:
             return name
@@ -124,7 +127,7 @@ _CAMERAS = [
      'prev_w':    640, 'prev_h':   480,  'prev_fps':    5},
     {'name': 'HQ Camera',      'short': 'HQ-CAM',
      'type': 'csi',
-     'stream_w': 1920, 'stream_h': 1080, 'stream_fps': 30,
+     'stream_w': 854, 'stream_h': 480, 'stream_fps': 30,
      'prev_w':    640, 'prev_h':   480,  'prev_fps':    5},
 ]
 
@@ -201,6 +204,9 @@ def _detect_cameras():
     except Exception:
         pass
     return available
+
+def _camera_is_available(cam_idx):
+    return cam_idx in _available_cams
 
 def _terminate(proc):
     if proc and proc.poll() is None:
@@ -302,8 +308,14 @@ def _preview_worker(cam, quality):
 _prev_thread = None
 
 def start_preview(cam):
-    global _prev_thread, _prev_frame
+    global _prev_thread, _prev_frame, _prev_cam_name
     stop_preview()
+    if cam['type'] == 'csi' and _is_csi_stream_active(cam['name']):
+        with _prev_lock:
+            _prev_frame = None
+        _prev_cam_name = cam['name']
+        log.info('Preview suppressed while streaming → %s', cam['name'])
+        return
     _prev_stop_evt.clear()
     with _prev_lock:
         _prev_frame = None
@@ -331,6 +343,15 @@ _stream_state = {
 _stream_proc_main  = None   # ffmpeg process
 _stream_proc_libcam = None  # rpicam-vid process (CSI only)
 _stream_stop_evt   = threading.Event()
+
+def _is_csi_stream_active(cam_name=None):
+    with _stream_lock:
+        if not _stream_state['running']:
+            return False
+        active_name = _stream_state['cam_name']
+    if cam_name is not None and active_name != cam_name:
+        return False
+    return any(c['name'] == active_name and c['type'] == 'csi' for c in _CAMERAS)
 
 def _build_stream_cmds(cam, rtmp_url, otr_url, quality):
     w, h, fps = cam['stream_w'], cam['stream_h'], cam['stream_fps']
@@ -362,7 +383,7 @@ def _build_stream_cmds(cam, rtmp_url, otr_url, quality):
              '--profile', 'high', '--level', '4.1',
              '--width', str(w), '--height', str(h),
              '--framerate', str(fps),
-             '--bitrate', '4000000',
+             '--bitrate', '1800000',
              '--intra', str(fps * 2),
              '--inline', '--nopreview',
              '-o', '-']
@@ -370,8 +391,21 @@ def _build_stream_cmds(cam, rtmp_url, otr_url, quality):
         )
         ffmpeg_cmd = [
             'ffmpeg', '-loglevel', 'warning',
+            '-analyzeduration', '10M',
+            '-probesize', '10M',
+            '-thread_queue_size', '64',
             '-f', 'h264', '-i', 'pipe:0',
-            '-i', otr_url,
+        ]
+        if otr_url == _OTR_SILENT:
+            ffmpeg_cmd += [
+                '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+            ]
+        else:
+            ffmpeg_cmd += [
+                '-thread_queue_size', '64',
+                '-i', otr_url,
+            ]
+        ffmpeg_cmd += [
             '-map', '0:v', '-map', '1:a',
             '-c:v', 'copy',
             '-c:a', 'aac', '-b:a', '128k',
@@ -443,6 +477,8 @@ def _stream_worker(cam, rtmp_url, otr_url, quality):
         _stream_state['start_time'] = None
         _stream_proc_main           = None
         _stream_proc_libcam         = None
+    if cam['type'] == 'csi':
+        start_preview(cam)
     log.info('Stream stopped')
 
 _stream_thread = None
@@ -455,10 +491,14 @@ def start_stream(cam_idx):
         return False, 'No stream key set. Add it in Settings.'
     if _stream_state['running']:
         return False, 'Stream already running.'
+    if not _camera_is_available(cam_idx):
+        return False, 'Selected camera is not available.'
 
     cam = dict(_CAMERAS[cam_idx])
     if cam['type'] == 'usb':
         cam['device'] = _find_usb_video_device()
+    else:
+        stop_preview()
 
     otr_url  = cfg.get('otr_station_url', _OTR_DEFAULT).strip() or _OTR_DEFAULT
     quality  = _get_quality(cfg)
@@ -479,46 +519,31 @@ def stop_stream():
         _terminate(_stream_proc_libcam)
         _terminate(_stream_proc_main)
 
+def _wait_for_stream_stop(timeout=8.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _stream_lock:
+            if not _stream_state['running']:
+                return True
+        time.sleep(0.1)
+    return False
+
 def switch_stream_camera(cam_idx):
-    """Hot-swap the camera mid-stream by killing and relaunching just the encode pipeline."""
-    global _stream_proc_main, _stream_proc_libcam, _stream_thread
+    """Switch cameras by cleanly restarting the stream on the selected source."""
     if not _stream_state['running']:
         return False, 'No stream is running.'
-    cfg = _load_cfg()
-    stream_key = cfg.get('youtube_stream_key', '').strip()
-    if not stream_key:
-        return False, 'No stream key.'
     cam_idx = max(0, min(cam_idx, len(_CAMERAS) - 1))
-    cam = dict(_CAMERAS[cam_idx])
-    if cam['type'] == 'usb':
-        cam['device'] = _find_usb_video_device()
-    otr_url  = cfg.get('otr_station_url', _OTR_DEFAULT).strip() or _OTR_DEFAULT
-    quality  = _get_quality(cfg)
-    rtmp_url = f'{_YT_RTMP_BASE}/{stream_key}'
-    # Kill current encode pipeline; the stream worker loop will relaunch with new cam
-    with _stream_lock:
-        _terminate(_stream_proc_libcam)
-        _terminate(_stream_proc_main)
-    # Wait briefly for the worker loop to notice the exit, then start new pipeline directly
-    time.sleep(1)
-    libcam_cmd, ffmpeg_cmd = _build_stream_cmds(cam, rtmp_url, otr_url, quality)
-    if libcam_cmd:
-        lc = subprocess.Popen(libcam_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        ff = subprocess.Popen(ffmpeg_cmd, stdin=lc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        lc.stdout.close()
-    else:
-        lc = None
-        ff = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    with _stream_lock:
-        _stream_proc_libcam = lc
-        _stream_proc_main   = ff
-        _stream_state['cam_name'] = cam['name']
-        _stream_state['retries']  = 0
-        _stream_state['error']    = ''
-    # Also switch the preview
-    start_preview(cam)
-    log.info('Camera switched mid-stream → %s', cam['name'])
-    return True, f'Switched to {cam["name"]}'
+    if not _camera_is_available(cam_idx):
+        return False, 'Selected camera is not available.'
+    target_name = _CAMERAS[cam_idx]['name']
+    stop_stream()
+    if not _wait_for_stream_stop():
+        return False, 'Timed out stopping the current stream.'
+    ok, msg = start_stream(cam_idx)
+    if ok:
+        log.info('Camera switched by restart → %s', target_name)
+        return True, f'Switched to {target_name}'
+    return False, msg
 
 # ── YouTube Live Chat Bot ─────────────────────────────────────────────────────
 _TOKEN_PATH      = os.path.join(_PROJECT_DIR, 'token.json')
@@ -873,6 +898,8 @@ def stop_bot():
 # ── HTML dashboard ─────────────────────────────────────────────────────────────
 def _otr_options(selected_url):
     opts = []
+    sel = ' selected' if selected_url == _OTR_SILENT else ''
+    opts.append(f'<option value="{_OTR_SILENT}"{sel}>No Audio (Silent)</option>')
     for name, url in _OTR_STATIONS:
         sel = ' selected' if url == selected_url else ''
         opts.append(f'<option value="{url}"{sel}>{name}</option>')
@@ -1656,6 +1683,8 @@ class _Handler(BaseHTTPRequestHandler):
                 cam_idx = 0
 
         cam_idx = max(0, min(cam_idx, len(_CAMERAS) - 1))
+        if not _camera_is_available(cam_idx) and _available_cams:
+            cam_idx = _available_cams[0]
         cam = dict(_CAMERAS[cam_idx])
         if cam['type'] == 'usb':
             cam['device'] = _find_usb_video_device()

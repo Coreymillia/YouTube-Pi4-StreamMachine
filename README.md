@@ -34,10 +34,10 @@ A standalone YouTube live streaming daemon for the **Raspberry Pi 4** — built 
 - **Live MJPEG focus preview** at ~5 fps — adjust your lens while watching. No clicking, no refreshing.
 - **Rule-of-thirds grid overlay** toggle for shot framing
 - **Camera auto-detection** — detects connected cameras at boot, defaults to HQ cam if available
-- **Mid-stream camera switch** — swap cameras during a live stream without disconnecting from YouTube
+- **Safer camera switch** — switching cameras now does a clean stop/restart of the stream pipeline instead of an in-place hot-swap
 - **YouTube RTMP streaming** via `rpicam-vid` (HQ cam) or v4l2 H264 passthrough (USB cam)
 - **Quality controls** — Brightness, Contrast, Saturation, Sharpness, Zoom, and White Balance — applied live to preview and stream
-- **OTR Radio audio** — 12 Old Time Radio stations from the ROKiT Radio Network overlaid on the HQ cam stream
+- **OTR Radio audio** — 12 Old Time Radio stations from the ROKiT Radio Network overlaid on the HQ cam stream, plus a **No Audio (Silent)** test option
 - **Auto-reconnect** — retries the stream up to 5 times on connection loss
 - **YouTube Live Chat Bot** *(optional)* — posts headless messages, random timed messages, and keyword-triggered replies
 - **Stream key saved locally** — stored in `config.json`, never transmitted anywhere else
@@ -111,13 +111,14 @@ http://<pi-ip>:8090
 - Camera selector (auto-populated from detected cameras)
 - OTR audio station selector
 - **Start Stream** / **Stop Stream** buttons
-- **↺ Switch Camera** button — appears only while streaming, lets you hot-swap cameras mid-stream (~3s pipeline restart, YouTube connection stays alive)
+- **↺ Switch Camera** button — appears only while streaming, performs a short stop/restart on the selected source for a safer recovery path
 
 ### Focus Preview
 - Live 5fps MJPEG feed from the selected camera
 - Toggle rule-of-thirds grid overlay
 - Refresh Preview button
 - Switching the camera dropdown automatically updates the preview
+- When the **HQ Camera** is live, its preview is paused so the CSI camera is not opened twice
 
 ### Quality Controls
 All settings apply to both the live preview and the stream. Hit **Apply to Preview** to commit.
@@ -157,7 +158,7 @@ All settings apply to both the live preview and the stream. Hit **Apply to Previ
 - Ribbon to **CAM/DISP 0** port — closest to the USB-C power port
 - Blue contacts on the ribbon face **toward the HDMI ports**
 - CSI cameras are detected at **boot** — plug in before powering on
-- Streams at **1920×1080 @ 30fps** via `rpicam-vid` hardware encoder
+- Streams at **854×480 @ 30fps** via `rpicam-vid` hardware encoder (reduced during this session to stabilize YouTube ingest on a jittery uplink)
 - Preview at **640×480 @ 5fps**
 
 ### USB Microscope Camera
@@ -173,6 +174,8 @@ All settings apply to both the live preview and the stream. Hit **Apply to Previ
 The HQ Camera stream overlays live audio from the **ROKiT Radio Network OTR** streams. Pick a station in the UI:
 
 1940s Radio *(default)* · American Comedy · American Classics · Jazz Central · Comedy Gold · Mystery Radio · Crime & Suspense · Crime Radio · Adventure Stories · Drama Radio · Nostalgia Lane · Science Fiction
+
+You can also choose **No Audio (Silent)** to test the video path without depending on the external radio stream.
 
 USB cam uses silent AAC to satisfy YouTube's audio requirement.
 
@@ -263,7 +266,7 @@ OAuth tokens are stored separately in `token.json` (gitignored — never committ
 
 ## Network
 
-Binds to `0.0.0.0:8090`. Works on Wi-Fi and Ethernet. Ethernet is detected automatically — no config change needed. If you switch interfaces, restart the service and the IP in the UI header updates.
+Binds to `0.0.0.0:8090`. Works on Wi-Fi and Ethernet. Ethernet is preferred for Internet-bound traffic when both links are active. If you switch interfaces, restart the service and the IP in the UI header updates.
 
 ---
 
@@ -285,7 +288,7 @@ All settings are stored in `config.json` on the Pi. Most are managed via the web
 | Field | Default | Description |
 |---|---|---|
 | `youtube_stream_key` | `""` | YouTube RTMP stream key |
-| `otr_station_url` | 1940s Radio URL | Audio station for HQ cam stream |
+| `otr_station_url` | 1940s Radio URL | Audio station for HQ cam stream; can also be set to the UI's **No Audio (Silent)** option |
 | `quality.brightness` | `0.0` | -1.0 to 1.0 |
 | `quality.contrast` | `1.0` | 0.0 to 2.0 (1.0 = neutral) |
 | `quality.saturation` | `1.0` | 0.0 to 2.0 (1.0 = neutral) |
@@ -308,3 +311,13 @@ YouTube-Pi4-StreamMachine/
 ```
 
 > `config.json` and `token.json` are gitignored and stay on the Pi only.
+
+---
+
+## Stability Notes from This Session
+
+- The HQ stream no longer runs the HQ preview at the same time. Opening the CSI camera twice caused repeated reconnects and broken FLV headers.
+- Camera switching now uses a clean stream restart instead of trying to hot-swap the encode pipeline in place.
+- The backend now rejects unavailable cameras, which prevents stale browser selections from trying to start a disconnected USB camera.
+- A silent-audio option was added to help isolate external-audio issues from video/network issues during troubleshooting.
+- The default HQ streaming profile is currently tuned for **stability over maximum resolution**.
