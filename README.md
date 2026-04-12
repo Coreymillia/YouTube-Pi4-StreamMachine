@@ -112,6 +112,7 @@ http://<pi-ip>:8090
 - OTR audio station selector
 - **Start Stream** / **Stop Stream** buttons
 - **↺ Switch Camera** button — appears only while streaming, performs a short stop/restart on the selected source for a safer recovery path
+- Optional **Away / Break Message** text box and toggle for showing a message on the live stream video
 
 ### Focus Preview
 - Live 5fps MJPEG feed from the selected camera
@@ -148,6 +149,7 @@ All settings apply to both the live preview and the stream. Hit **Apply to Previ
 
 ### Settings
 - YouTube stream key (password field, saved to `config.json` on the Pi)
+- Optional stream message overlay text + on/off toggle
 
 ---
 
@@ -291,6 +293,8 @@ All settings are stored in `config.json` on the Pi. Most are managed via the web
 |---|---|---|
 | `youtube_stream_key` | `""` | YouTube RTMP stream key |
 | `otr_station_url` | 1940s Radio URL | Audio station for HQ cam stream; can also be set to the UI's **No Audio (Silent)** option |
+| `stream_message.enabled` | `false` | Shows the custom message on the live stream video |
+| `stream_message.text` | `""` | Message text for breaks, away time, or status notes |
 | `quality.brightness` | `0.0` | -1.0 to 1.0 |
 | `quality.contrast` | `1.0` | 0.0 to 2.0 (1.0 = neutral) |
 | `quality.saturation` | `1.0` | 0.0 to 2.0 (1.0 = neutral) |

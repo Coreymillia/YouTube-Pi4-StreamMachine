@@ -6,6 +6,7 @@ __pycache__/
 *.jpg
 *.jpeg
 *.png
+YouTubeCYD/.pio/
 # Allow README photos
 !IMG_20260410_153439755_HDR.jpg
 !IMG_20260410_153512234_HDR.jpg

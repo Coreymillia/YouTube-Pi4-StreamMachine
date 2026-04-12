@@ -32,6 +32,7 @@ _PROJECT_DIR  = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH  = os.path.join(_PROJECT_DIR, 'config.json')
 _PORT         = 8090
 _YT_RTMP_BASE = 'rtmp://a.rtmp.youtube.com/live2'
+_STREAM_MESSAGE_FILE = '/tmp/youtube_pi_stream_message.txt'
 
 # ── OTR radio stations ────────────────────────────────────────────────────────
 _OTR_STATIONS = [
@@ -76,6 +77,11 @@ _QUALITY_DEFAULTS = {
     'sharpness':  1.0,
     'zoom':       1.0,
     'awb':        'auto',
+}
+
+_MESSAGE_DEFAULTS = {
+    'enabled': False,
+    'text':    '',
 }
 
 def _get_quality(cfg):
@@ -142,6 +148,27 @@ def _load_cfg():
 def _save_cfg(cfg):
     with open(_CONFIG_PATH, 'w') as f:
         json.dump(cfg, f, indent=4)
+
+
+def _get_message_cfg(cfg):
+    m = dict(_MESSAGE_DEFAULTS)
+    m.update(cfg.get('stream_message', {}))
+    m['enabled'] = bool(m.get('enabled'))
+    text = str(m.get('text', '')).replace('\r', ' ').replace('\n', ' ').strip()
+    m['text'] = text[:120]
+    return m
+
+
+def _write_message_file(msg_cfg):
+    text = msg_cfg['text'] if msg_cfg.get('enabled') and msg_cfg.get('text') else ''
+    with open(_STREAM_MESSAGE_FILE, 'w') as f:
+        f.write(text)
+
+
+def _message_info_text(msg_cfg):
+    if not msg_cfg.get('enabled') or not msg_cfg.get('text'):
+        return ''
+    return msg_cfg['text'].replace('%', '%%')
 
 def _get_local_ip():
     """Try up to 10s for a real routable IP (DHCP may not be ready at boot)."""
@@ -228,6 +255,30 @@ def _net_tx_bytes(iface='eth0'):
         return None
 
 
+def _net_rx_bytes(iface='eth0'):
+    try:
+        with open(f'/sys/class/net/{iface}/statistics/rx_bytes') as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _net_operstate(iface='eth0'):
+    try:
+        with open(f'/sys/class/net/{iface}/operstate') as f:
+            return f.read().strip()
+    except Exception:
+        return 'unknown'
+
+
+def _net_carrier(iface='eth0'):
+    try:
+        with open(f'/sys/class/net/{iface}/carrier') as f:
+            return f.read().strip() == '1'
+    except Exception:
+        return False
+
+
 def _ffmpeg_rtmp_socket_state(pid):
     try:
         out = subprocess.check_output(
@@ -244,6 +295,36 @@ def _ffmpeg_rtmp_socket_state(pid):
             continue
         parts = line.split()
         return parts[0] if parts else ''
+    return ''
+
+
+def _vcgencmd_value(*args):
+    try:
+        out = subprocess.check_output(
+            ['vcgencmd', *args],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+        return out.strip()
+    except Exception:
+        return ''
+
+
+def _temp_celsius():
+    raw = _vcgencmd_value('measure_temp')
+    if raw.startswith('temp=') and raw.endswith("'C"):
+        try:
+            return float(raw[5:-2])
+        except ValueError:
+            return None
+    return None
+
+
+def _throttled_state():
+    raw = _vcgencmd_value('get_throttled')
+    if raw.startswith('throttled='):
+        return raw.split('=', 1)[1]
     return ''
 
 # ── Live MJPEG preview ────────────────────────────────────────────────────────
@@ -380,7 +461,7 @@ def _is_csi_stream_active(cam_name=None):
         return False
     return any(c['name'] == active_name and c['type'] == 'csi' for c in _CAMERAS)
 
-def _build_stream_cmds(cam, rtmp_url, otr_url, quality):
+def _build_stream_cmds(cam, rtmp_url, otr_url, quality, msg_cfg):
     w, h, fps = cam['stream_w'], cam['stream_h'], cam['stream_fps']
     if cam['type'] == 'usb':
         dev = cam.get('device') or _find_usb_video_device()
@@ -388,7 +469,14 @@ def _build_stream_cmds(cam, rtmp_url, otr_url, quality):
             ['v4l2-ctl', '-d', dev, '--set-ctrl=h264_i_frame_period=60'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        eq = _usb_quality_filter(quality)
+        vf_filters = [_usb_quality_filter(quality)]
+        if msg_cfg.get('enabled') and msg_cfg.get('text'):
+            vf_filters.append(
+                f"drawtext=textfile={_STREAM_MESSAGE_FILE}:reload=1:"
+                "fontcolor=white:fontsize=28:box=1:boxcolor=black@0.55:boxborderw=10:"
+                "x=(w-text_w)/2:y=h-th-26"
+            )
+        eq = ','.join(vf_filters)
         libcam_cmd = None
         ffmpeg_cmd = [
             'ffmpeg', '-loglevel', 'warning',
@@ -416,6 +504,9 @@ def _build_stream_cmds(cam, rtmp_url, otr_url, quality):
              '-o', '-']
             + _csi_quality_args(quality)
         )
+        info_text = _message_info_text(msg_cfg)
+        if info_text:
+            libcam_cmd += ['--info-text', info_text]
         ffmpeg_cmd = [
             'ffmpeg', '-loglevel', 'warning',
             '-analyzeduration', '10M',
@@ -449,7 +540,9 @@ def _stream_worker(cam, rtmp_url, otr_url, quality):
     last_tx_bytes = None
 
     def _launch():
-        libcam_cmd, ffmpeg_cmd = _build_stream_cmds(cam, rtmp_url, otr_url, quality)
+        msg_cfg = _get_message_cfg(_load_cfg())
+        _write_message_file(msg_cfg)
+        libcam_cmd, ffmpeg_cmd = _build_stream_cmds(cam, rtmp_url, otr_url, quality, msg_cfg)
         if libcam_cmd:
             lc = subprocess.Popen(libcam_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             ff = subprocess.Popen(ffmpeg_cmd, stdin=lc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -588,6 +681,28 @@ def _wait_for_stream_stop(timeout=8.0):
                 return True
         time.sleep(0.1)
     return False
+
+
+def _active_stream_cam_idx():
+    with _stream_lock:
+        cam_name = _stream_state['cam_name']
+        running = _stream_state['running']
+    if not running or not cam_name:
+        return None
+    for i, cam in enumerate(_CAMERAS):
+        if cam['name'] == cam_name:
+            return i
+    return None
+
+
+def _restart_active_stream():
+    cam_idx = _active_stream_cam_idx()
+    if cam_idx is None:
+        return False, 'No stream is running.'
+    stop_stream()
+    if not _wait_for_stream_stop():
+        return False, 'Timed out stopping the current stream.'
+    return start_stream(cam_idx)
 
 def switch_stream_camera(cam_idx):
     """Switch cameras by cleanly restarting the stream on the selected source."""
@@ -1061,6 +1176,18 @@ details[open]>summary{{color:#aaa}}
     <input type="password" id="stream-key" value="{stream_key}" placeholder="Paste key from YouTube Studio">
     <div class="hint">YouTube Studio → Go Live → Stream Key</div>
 
+    <label style="margin-top:12px">Away / Break Message</label>
+    <textarea id="stream-message-text" rows="3" maxlength="120"
+      style="width:100%;margin-top:4px;background:#1e1e1e;color:#fff;border:1px solid #3a3a3a;padding:7px;border-radius:4px;font-family:monospace;font-size:12px;resize:vertical"
+      placeholder="On break — back soon">{stream_message_text}</textarea>
+    <div class="hint">Optional overlay shown on the live stream video.</div>
+    <label class="toggle-wrap" style="margin-top:10px">
+      <input type="checkbox" id="stream-message-enabled" {stream_message_checked}>
+      <span class="toggle-slider"></span>
+      <span style="margin-left:8px;color:#ccc;font-size:13px">Show message on stream</span>
+    </label>
+    <div class="hint" id="stream-message-state" style="margin-top:6px"></div>
+
     <div style="margin-top:10px">
       <button class="btn btn-grey" onclick="saveSettings()">&#128190; Save Settings</button>
     </div>
@@ -1176,11 +1303,16 @@ function stopStream() {{
 function saveSettings() {{
   var key = document.getElementById('stream-key').value;
   var otr = otrSel.value;
+  var msg = document.getElementById('stream-message-text').value;
+  var msgEnabled = document.getElementById('stream-message-enabled').checked ? '1' : '0';
   fetch('/settings', {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
-    body:'youtube_stream_key='+encodeURIComponent(key)+'&otr_station_url='+encodeURIComponent(otr)}})
+    body:'youtube_stream_key='+encodeURIComponent(key)
+      +'&otr_station_url='+encodeURIComponent(otr)
+      +'&stream_message_text='+encodeURIComponent(msg)
+      +'&stream_message_enabled='+msgEnabled}})
   .then(r=>r.json()).then(d=>{{
     var el = document.getElementById('save-msg');
-    el.textContent = d.ok ? '✓ Saved' : '✗ ' + d.msg;
+    el.textContent = d.ok ? (d.restarted ? '✓ Saved · stream restarted' : '✓ Saved') : '✗ ' + d.msg;
     setTimeout(function(){{el.textContent=''}}, 3000);
   }});
 }}
@@ -1225,6 +1357,21 @@ function updateStatus() {{
       setSlider('zoom',       Math.round(q.zoom       * 10));
       var awbEl = document.getElementById('sl-awb');
       if (awbEl && q.awb) awbEl.value = q.awb;
+    }}
+    if (!window._msgInitDone && s.stream_message) {{
+      window._msgInitDone = true;
+      document.getElementById('stream-message-text').value = s.stream_message.text || '';
+      document.getElementById('stream-message-enabled').checked = !!s.stream_message.enabled;
+    }}
+    var msgState = document.getElementById('stream-message-state');
+    if (msgState && s.stream_message) {{
+      if (s.stream_message.enabled && s.stream_message.text) {{
+        msgState.textContent = s.running
+          ? 'Message enabled — changing it while live causes a quick stream restart.'
+          : 'Message enabled for the next stream.';
+      }} else {{
+        msgState.textContent = 'Message overlay is off.';
+      }}
     }}
     document.getElementById('footer').textContent =
       'YouTube Studio · http://{ip}:{port}' + (s.running ? '  ·  streaming to YouTube' : '');
@@ -1534,6 +1681,7 @@ def _render_dashboard():
     ip         = _get_local_ip()
     stream_key = cfg.get('youtube_stream_key', '')
     otr_url    = cfg.get('otr_station_url', _OTR_DEFAULT)
+    msg_cfg    = _get_message_cfg(cfg)
     cam_names  = json.dumps({str(i): c['short'] for i, c in enumerate(_CAMERAS)})
     q          = _get_quality(cfg)
     awb_opts   = ''.join(
@@ -1562,6 +1710,8 @@ def _render_dashboard():
     return _DASHBOARD_HTML.format(
         ip=ip, port=_PORT,
         stream_key=stream_key,
+        stream_message_text=html.escape(msg_cfg['text']),
+        stream_message_checked='checked' if msg_cfg['enabled'] else '',
         cam_opts=_camera_options(0),
         otr_opts=_otr_options(otr_url),
         cam_names_json=cam_names,
@@ -1706,12 +1856,28 @@ class _Handler(BaseHTTPRequestHandler):
 
         elif path == '/settings':
             cfg = _load_cfg()
+            prev_msg_cfg = _get_message_cfg(cfg)
             cfg['youtube_stream_key'] = get('youtube_stream_key').strip()
             cfg['otr_station_url']    = get('otr_station_url').strip() or _OTR_DEFAULT
+            cfg['stream_message'] = {
+                'enabled': get('stream_message_enabled') == '1',
+                'text': get('stream_message_text'),
+            }
+            cfg['stream_message'] = _get_message_cfg(cfg)
             try:
                 _save_cfg(cfg)
+                _write_message_file(cfg['stream_message'])
+                restarted = False
+                with _stream_lock:
+                    stream_running = _stream_state['running']
+                if cfg['stream_message'] != prev_msg_cfg and stream_running:
+                    ok, msg = _restart_active_stream()
+                    if not ok:
+                        self._json({'ok': False, 'msg': msg})
+                        return
+                    restarted = True
                 log.info('Settings saved')
-                self._json({'ok': True})
+                self._json({'ok': True, 'restarted': restarted})
             except Exception as exc:
                 self._json({'ok': False, 'msg': str(exc)})
         else:
@@ -1782,9 +1948,13 @@ class _Handler(BaseHTTPRequestHandler):
     def _serve_status(self):
         with _stream_lock:
             s = dict(_stream_state)
+            ff = _stream_proc_main
         uptime = 0
         if s['start_time']:
             uptime = int(time.monotonic() - s['start_time'])
+        cfg = _load_cfg()
+        otr_url = cfg.get('otr_station_url', _OTR_DEFAULT).strip() or _OTR_DEFAULT
+        rtmp_state = _ffmpeg_rtmp_socket_state(ff.pid) if ff and ff.poll() is None else ''
         self._json({
             'running':        s['running'],
             'cam_name':       s['cam_name'],
@@ -1793,7 +1963,21 @@ class _Handler(BaseHTTPRequestHandler):
             'error':          s['error'],
             'available_cams': _available_cams,
             'preview_cam':    _prev_cam_name or '',
-            'quality':        _get_quality(_load_cfg()),
+            'quality':        _get_quality(cfg),
+            'stream_message': _get_message_cfg(cfg),
+            'audio_name':     _otr_name(otr_url),
+            'audio_silent':   otr_url == _OTR_SILENT,
+            'rtmp_state':     rtmp_state,
+            'eth0': {
+                'carrier':   _net_carrier('eth0'),
+                'operstate': _net_operstate('eth0'),
+                'tx_bytes':  _net_tx_bytes('eth0'),
+                'rx_bytes':  _net_rx_bytes('eth0'),
+            },
+            'system': {
+                'temp_c':    _temp_celsius(),
+                'throttled': _throttled_state(),
+            },
         })
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -1812,6 +1996,7 @@ class _Handler(BaseHTTPRequestHandler):
 # ── Entry point ────────────────────────────────────────────────────────────────
 def main():
     global _available_cams
+    _write_message_file(_get_message_cfg(_load_cfg()))
     ip = _get_local_ip()
     log.info('YouTube Studio starting on http://%s:%d', ip, _PORT)
 
