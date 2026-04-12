@@ -266,7 +266,9 @@ OAuth tokens are stored separately in `token.json` (gitignored — never committ
 
 ## Network
 
-Binds to `0.0.0.0:8090`. Works on Wi-Fi and Ethernet. Ethernet is preferred for Internet-bound traffic when both links are active. If you switch interfaces, restart the service and the IP in the UI header updates.
+Binds to `0.0.0.0:8090`. Works on Wi-Fi and Ethernet. This setup is intended to use **Wi-Fi for the setup UI** and **Ethernet for the live YouTube uplink**. If you switch interfaces, restart the service and the IP in the UI header updates.
+
+On Pi 4 systems that show `bcmgenet ... NETDEV WATCHDOG` transmit queue stalls on `eth0`, the bundled systemd service disables **EEE**, **GRO**, and **GSO** on startup before launching the daemon.
 
 ---
 
@@ -321,3 +323,4 @@ YouTube-Pi4-StreamMachine/
 - The backend now rejects unavailable cameras, which prevents stale browser selections from trying to start a disconnected USB camera.
 - A silent-audio option was added to help isolate external-audio issues from video/network issues during troubleshooting.
 - The default HQ streaming profile is currently tuned for **stability over maximum resolution**.
+- The systemd unit now disables `eth0` EEE/GRO/GSO at startup to reduce Raspberry Pi 4 `bcmgenet` transmit-queue watchdog stalls during long Ethernet-backed streams.

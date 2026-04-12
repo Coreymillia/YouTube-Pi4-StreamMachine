@@ -4,6 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
+PermissionsStartOnly=true
+ExecStartPre=/usr/sbin/ethtool --set-eee eth0 eee off
+ExecStartPre=/usr/sbin/ethtool -K eth0 gro off gso off
 ExecStart=/usr/bin/python3 /home/coreymillia/youtube-studio/youtube_studio.py
 WorkingDirectory=/home/coreymillia/youtube-studio
 User=coreymillia

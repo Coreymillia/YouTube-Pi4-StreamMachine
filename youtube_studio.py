@@ -219,6 +219,33 @@ def _terminate(proc):
             except Exception:
                 pass
 
+
+def _net_tx_bytes(iface='eth0'):
+    try:
+        with open(f'/sys/class/net/{iface}/statistics/tx_bytes') as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _ffmpeg_rtmp_socket_state(pid):
+    try:
+        out = subprocess.check_output(
+            ['ss', '-tanp'],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return ''
+    marker = f'pid={pid},'
+    for line in out.splitlines():
+        if marker not in line or ':1935' not in line:
+            continue
+        parts = line.split()
+        return parts[0] if parts else ''
+    return ''
+
 # ── Live MJPEG preview ────────────────────────────────────────────────────────
 _prev_lock     = threading.Lock()
 _prev_frame    = None       # latest JPEG bytes
@@ -418,6 +445,8 @@ def _stream_worker(cam, rtmp_url, otr_url, quality):
 
     MAX_RETRIES = 5
     retries = 0
+    stall_checks = 0
+    last_tx_bytes = None
 
     def _launch():
         libcam_cmd, ffmpeg_cmd = _build_stream_cmds(cam, rtmp_url, otr_url, quality)
@@ -428,10 +457,40 @@ def _stream_worker(cam, rtmp_url, otr_url, quality):
             return lc, ff
         return None, subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
+    def _read_ffmpeg_err(ff_proc):
+        try:
+            err_out = (ff_proc.stderr.read() or b'').decode(errors='replace')
+            return ' | '.join(l.strip() for l in err_out.splitlines() if l.strip())[-300:]
+        except Exception:
+            return ''
+
+    def _reconnect(reason):
+        nonlocal lc, ff, retries, stall_checks, last_tx_bytes
+        retries += 1
+        with _stream_lock:
+            _stream_state['retries'] = retries
+        if retries > MAX_RETRIES:
+            log.error('Stream failed after %d retries', MAX_RETRIES)
+            with _stream_lock:
+                _stream_state['error'] = f'Failed after {MAX_RETRIES} retries'
+            return False
+        log.warning('%s — reconnect %d/%d', reason, retries, MAX_RETRIES)
+        _terminate(lc)
+        _terminate(ff)
+        time.sleep(5)
+        lc, ff = _launch()
+        with _stream_lock:
+            _stream_proc_libcam = lc
+            _stream_proc_main   = ff
+        stall_checks = 0
+        last_tx_bytes = _net_tx_bytes('eth0')
+        return True
+
     lc, ff = _launch()
     with _stream_lock:
         _stream_proc_libcam = lc
         _stream_proc_main   = ff
+    last_tx_bytes = _net_tx_bytes('eth0')
 
     log.info('Stream started → %s  RTMP: %s', cam['name'], rtmp_url[-20:])
 
@@ -445,30 +504,32 @@ def _stream_worker(cam, rtmp_url, otr_url, quality):
     while not _stream_stop_evt.is_set():
         time.sleep(2)
         if ff.poll() is not None and not _stream_stop_evt.is_set():
-            # Capture last lines of ffmpeg stderr for diagnostics
-            try:
-                err_out = (ff.stderr.read() or b'').decode(errors='replace')
-                last_err = ' | '.join(l.strip() for l in err_out.splitlines() if l.strip())[-300:]
-                if last_err:
-                    log.warning('ffmpeg exit output: %s', last_err)
-            except Exception:
-                pass
-            retries += 1
-            with _stream_lock:
-                _stream_state['retries'] = retries
-            if retries > MAX_RETRIES:
-                log.error('Stream failed after %d retries', MAX_RETRIES)
-                with _stream_lock:
-                    _stream_state['error'] = f'Failed after {MAX_RETRIES} retries'
+            last_err = _read_ffmpeg_err(ff)
+            if last_err:
+                log.warning('ffmpeg exit output: %s', last_err)
+            if not _reconnect('Stream dropped'):
                 break
-            log.warning('Stream dropped — reconnect %d/%d', retries, MAX_RETRIES)
-            _terminate(lc)
-            _terminate(ff)
-            time.sleep(5)
-            lc, ff = _launch()
-            with _stream_lock:
-                _stream_proc_libcam = lc
-                _stream_proc_main   = ff
+            continue
+
+        if ff.poll() is None:
+            tx_now = _net_tx_bytes('eth0')
+            rtmp_state = _ffmpeg_rtmp_socket_state(ff.pid)
+            stalled = False
+            if rtmp_state in ('CLOSE-WAIT', 'CLOSING', 'LAST-ACK', 'FIN-WAIT-1', 'FIN-WAIT-2', 'TIME-WAIT', 'CLOSE'):
+                stalled = True
+            elif tx_now is not None and last_tx_bytes is not None and tx_now <= last_tx_bytes:
+                stall_checks += 1
+            else:
+                stall_checks = 0
+            last_tx_bytes = tx_now
+
+            if stalled:
+                if not _reconnect(f'Stream socket stalled ({rtmp_state})'):
+                    break
+                continue
+            if stall_checks >= 6:
+                if not _reconnect('No eth0 transmit progress detected'):
+                    break
 
     _terminate(lc)
     _terminate(ff)
