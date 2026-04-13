@@ -18,6 +18,14 @@ A standalone YouTube live streaming daemon for the **Raspberry Pi 4** — built 
 ![Coin Engraving Bench](IMG_20260410_155323931_HDR.jpg)
 *The actual workbench — Leica microscope, HQ camera on a gooseneck arm, engraving tools, polished coins, and the YouTube Studio UI visible on a tablet in the corner. This is what "bench chaos" looks like when it's working.*
 
+### CYD Stream Dashboard
+![CYD Stream Dashboard](IMG_20260412_141619432_HDR.jpg)
+*The ESP32 Cheap Yellow Display acting as a compact stream monitor — live status, LAN traffic, temperature, retries, and one-tap controls without opening the browser UI.*
+
+### CYD Snapshot Mode
+![CYD Snapshot Mode](IMG_20260412_175145104_HDR.jpg)
+*Snapshot mode on the CYD for quick alignment checks. It pulls a still JPEG from the Pi preview path and can auto-refresh or be refreshed manually from the touchscreen.*
+
 ---
 
 ## Hardware
@@ -32,6 +40,7 @@ A standalone YouTube live streaming daemon for the **Raspberry Pi 4** — built 
 ## Features
 
 - **Live MJPEG focus preview** at ~5 fps — adjust your lens while watching. No clicking, no refreshing.
+- **Single JPEG snapshot endpoint** for lightweight remote previews such as the CYD dashboard
 - **Rule-of-thirds grid overlay** toggle for shot framing
 - **Camera auto-detection** — detects connected cameras at boot, defaults to HQ cam if available
 - **Safer camera switch** — switching cameras now does a clean stop/restart of the stream pipeline instead of an in-place hot-swap
@@ -39,6 +48,8 @@ A standalone YouTube live streaming daemon for the **Raspberry Pi 4** — built 
 - **Quality controls** — Brightness, Contrast, Saturation, Sharpness, Zoom, and White Balance — applied live to preview and stream
 - **OTR Radio audio** — 12 Old Time Radio stations from the ROKiT Radio Network overlaid on the HQ cam stream, plus a **No Audio (Silent)** test option
 - **Auto-reconnect** — retries the stream up to 5 times on connection loss
+- **CYD companion display** — touch dashboard for stream state, Ethernet health, system temperature, and quick controls
+- **CYD snapshot mode** — lightweight still-image camera alignment view with manual refresh and timed auto-refresh
 - **YouTube Live Chat Bot** *(optional)* — posts headless messages, random timed messages, and keyword-triggered replies
 - **Stream key saved locally** — stored in `config.json`, never transmitted anywhere else
 - **Auto-starts on boot** via systemd
@@ -99,6 +110,7 @@ http://<pi-ip>:8090
 |---|---|
 | `/` | Main dashboard |
 | `/preview` | Raw MJPEG feed |
+| `/snapshot` | Single JPEG frame from the current preview camera |
 | `/status` | JSON status (running, uptime, cams, quality) |
 | `/bot_status` | JSON chat bot status |
 
@@ -151,6 +163,18 @@ All settings apply to both the live preview and the stream. Hit **Apply to Previ
 - YouTube stream key (password field, saved to `config.json` on the Pi)
 - Optional stream message overlay text + on/off toggle
 
+### CYD Dashboard
+- Compact touchscreen dashboard for **GO / STOP / REF / PORT**
+- Shows stream state, selected camera, OTR audio source, LAN traffic, RTMP/Ethernet state, retries, and system temperature
+- Uses `/status` for health data and control actions
+
+### CYD Snapshot Mode
+- Opened from the **SHOT** button on the CYD
+- Pulls a single JPEG from `/snapshot`
+- Auto-refreshes every **15 seconds**
+- Includes a manual **SNAP** button for immediate refresh
+- Designed for framing/alignment, not full live video
+
 ---
 
 ## Camera Notes
@@ -186,10 +210,12 @@ USB cam uses silent AAC to satisfy YouTube's audio requirement.
 ## Getting a YouTube Stream Key
 
 1. Go to [YouTube Studio → Go Live](https://studio.youtube.com/)
-2. **Stream** tab → copy your Stream Key
-3. Paste into the Settings panel → Save Settings
+2. On the stream setup page, leave it on the **Default stream key**
+3. Click **How to use the encoder**
+4. Copy the stream key from the panel that opens
+5. Paste it into the YouTube-Pi Settings panel and click **Save Settings**
 
-> Enable **persistent stream key** in YouTube Studio if you don't want a new key every session.
+> You do **not** need to generate a new key every night if you keep using the default/persistent stream key in YouTube Studio.
 
 ---
 

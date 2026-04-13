@@ -11,6 +11,7 @@ struct YtStatus {
     uint32_t uptime_s = 0;
     int retries = 0;
     char cam_name[24] = "";
+    char preview_cam[24] = "";
     char audio_name[24] = "";
     char error[128] = "";
     char rtmp_state[16] = "";
@@ -61,6 +62,7 @@ static bool ytFetchStatus(const char* host, uint16_t port) {
     yt_status.uptime_s = doc["uptime_s"] | 0;
     yt_status.retries = doc["retries"] | 0;
     strlcpy(yt_status.cam_name, doc["cam_name"] | "", sizeof(yt_status.cam_name));
+    strlcpy(yt_status.preview_cam, doc["preview_cam"] | "", sizeof(yt_status.preview_cam));
     strlcpy(yt_status.audio_name, doc["audio_name"] | "", sizeof(yt_status.audio_name));
     strlcpy(yt_status.error, doc["error"] | "", sizeof(yt_status.error));
     strlcpy(yt_status.rtmp_state, doc["rtmp_state"] | "", sizeof(yt_status.rtmp_state));

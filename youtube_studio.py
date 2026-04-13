@@ -439,6 +439,46 @@ def stop_preview():
         _prev_proc = None
     _terminate(proc)
 
+
+def _resolve_preview_cam_idx(cam_idx):
+    if cam_idx == -1:
+        if _prev_cam_name:
+            cam_idx = next((i for i, c in enumerate(_CAMERAS) if c['name'] == _prev_cam_name), -1)
+        elif _available_cams:
+            cam_idx = _available_cams[0]
+        else:
+            cam_idx = 0
+    cam_idx = max(0, min(cam_idx, len(_CAMERAS) - 1))
+    if not _camera_is_available(cam_idx) and _available_cams:
+        cam_idx = _available_cams[0]
+    return cam_idx
+
+
+def _preview_cam(cam_idx=-1):
+    cam_idx = _resolve_preview_cam_idx(cam_idx)
+    cam = dict(_CAMERAS[cam_idx])
+    if cam['type'] == 'usb':
+        cam['device'] = _find_usb_video_device()
+    return cam_idx, cam
+
+
+def _ensure_preview_running(cam_idx=-1):
+    _, cam = _preview_cam(cam_idx)
+    if _prev_cam_name != cam['name'] or _prev_proc is None:
+        start_preview(cam)
+    return cam
+
+
+def _wait_for_preview_frame(timeout=2.5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _prev_lock:
+            frame = _prev_frame
+        if frame:
+            return frame
+        time.sleep(0.05)
+    return None
+
 # ── YouTube stream ─────────────────────────────────────────────────────────────
 _stream_lock  = threading.Lock()
 _stream_state = {
@@ -1733,6 +1773,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_dashboard()
         elif path == '/preview':
             self._serve_preview()
+        elif path == '/snapshot':
+            self._serve_snapshot()
         elif path == '/status':
             self._serve_status()
         elif path == '/bot_status':
@@ -1897,28 +1939,7 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             cam_idx = -1
 
-        # If no explicit cam requested, use whatever is already running;
-        # fallback to first available camera.
-        if cam_idx == -1:
-            if _prev_cam_name:
-                cam_idx = next(
-                    (i for i, c in enumerate(_CAMERAS) if c['name'] == _prev_cam_name), 0
-                )
-            elif _available_cams:
-                cam_idx = _available_cams[0]
-            else:
-                cam_idx = 0
-
-        cam_idx = max(0, min(cam_idx, len(_CAMERAS) - 1))
-        if not _camera_is_available(cam_idx) and _available_cams:
-            cam_idx = _available_cams[0]
-        cam = dict(_CAMERAS[cam_idx])
-        if cam['type'] == 'usb':
-            cam['device'] = _find_usb_video_device()
-
-        # Only restart preview if switching to a different camera
-        if _prev_cam_name != cam['name'] or _prev_proc is None:
-            start_preview(cam)
+        cam = _ensure_preview_running(cam_idx)
 
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
@@ -1944,6 +1965,29 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         log.info('Preview client disconnected')
+
+    def _serve_snapshot(self):
+        """Serve a single JPEG frame from the current preview camera."""
+        qs = self.path.split('?', 1)[1] if '?' in self.path else ''
+        qp = parse_qs(qs)
+        try:
+            cam_idx = int(qp.get('cam', ['-1'])[0])
+        except ValueError:
+            cam_idx = -1
+
+        cam = _ensure_preview_running(cam_idx)
+        frame = _wait_for_preview_frame()
+        if not frame:
+            self._send(503, b'Preview frame unavailable', 'text/plain')
+            return
+
+        log.info('Snapshot served → %s (%d bytes)', cam['name'], len(frame))
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/jpeg')
+        self.send_header('Content-Length', str(len(frame)))
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.end_headers()
+        self.wfile.write(frame)
 
     def _serve_status(self):
         with _stream_lock:
