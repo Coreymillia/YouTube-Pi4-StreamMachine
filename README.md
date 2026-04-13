@@ -150,7 +150,7 @@ All settings apply to both the live preview and the stream. Hit **Apply to Previ
 | Mode | Best for |
 |---|---|
 | Auto | Camera guesses — can be thrown off by LEDs |
-| **Tungsten** | **LED ring lights and artificial lighting — try this first** |
+| **Tungsten** | *** |
 | Fluorescent | Shop/fluorescent overhead lighting |
 | Indoor | Mixed indoor light |
 | Daylight | Natural window light |
@@ -219,7 +219,7 @@ USB cam uses silent AAC to satisfy YouTube's audio requirement.
 
 ---
 
-## YouTube Live Chat Bot (Optional)
+## YouTube Live Chat Bot (Optional) UNTESTED. I don't actually know if the pi can handle this. Still testing.
 
 The chat bot posts messages to your YouTube Live chat automatically — useful when you're streaming headless with no keyboard or screen and can't read or respond to chat yourself.
 
