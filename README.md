@@ -32,6 +32,7 @@ A standalone YouTube live streaming daemon for the **Raspberry Pi 4** — built 
 
 - **Raspberry Pi 4 Model B**
 - **Raspberry Pi HQ Camera (IMX477)** — connected via CSI ribbon to the CAM/DISP 0 port (closest to USB-C power)
+- **C-mount lens support** — the HQ Camera can use any compatible C-mount lens, so the build is not limited to the engraving lens shown in the photos
 - **USB Microscope Camera** — optional, plug-and-play (H264 capable recommended)
 - Optional: Bluetooth keyboard for SSH/terminal access without a screen
 
@@ -50,7 +51,7 @@ A standalone YouTube live streaming daemon for the **Raspberry Pi 4** — built 
 - **Auto-reconnect** — retries the stream up to 5 times on connection loss
 - **CYD companion display** — touch dashboard for stream state, Ethernet health, system temperature, and quick controls
 - **CYD snapshot mode** — lightweight still-image camera alignment view with manual refresh and timed auto-refresh
-- **YouTube Live Chat Bot** *(optional)* — posts headless messages, random timed messages, and keyword-triggered replies
+- **YouTube Live Chat Bot** *(optional / not yet validated on this bench)* — included for headless messages, random timed messages, and keyword-triggered replies
 - **Stream key saved locally** — stored in `config.json`, never transmitted anywhere else
 - **Auto-starts on boot** via systemd
 
@@ -150,14 +151,14 @@ All settings apply to both the live preview and the stream. Hit **Apply to Previ
 | Mode | Best for |
 |---|---|
 | Auto | Camera guesses — can be thrown off by LEDs |
-| **Tungsten** | *** |
+| Tungsten | Warm indoor lighting; may skew blue under some LED ring lights |
 | Fluorescent | Shop/fluorescent overhead lighting |
 | Indoor | Mixed indoor light |
-| Daylight | Natural window light |
+| **Daylight** | **Best starting point for this engraving setup and LED ring lighting** |
 | Cloudy | Overcast outdoor |
 | Custom | Reserved for manual gains |
 
-> **Tip for coin engraving / polished metal:** Start with **Tungsten** white balance, drop Saturation to ~70–80, and leave Contrast near 100. The bright LED on shiny silver/copper already creates natural contrast — you don't need to add more.
+> **Tip for coin engraving / polished metal:** Start with **Daylight** white balance, drop Saturation to ~70–80, and leave Contrast near 100. On this setup, **Tungsten** pushed the image too blue under the LED ring light.
 
 ### Settings
 - YouTube stream key (password field, saved to `config.json` on the Pi)
@@ -219,9 +220,11 @@ USB cam uses silent AAC to satisfy YouTube's audio requirement.
 
 ---
 
-## YouTube Live Chat Bot (Optional) UNTESTED. I don't actually know if the pi can handle this. Still testing.
+## YouTube Live Chat Bot (Optional / Experimental)
 
-The chat bot posts messages to your YouTube Live chat automatically — useful when you're streaming headless with no keyboard or screen and can't read or respond to chat yourself.
+The chat bot is included to post messages to your YouTube Live chat automatically — useful when you're streaming headless with no keyboard or screen and can't read or respond to chat yourself.
+
+> **Current status:** the bot UI and OAuth flow are included, but it has **not yet been fully validated during a real stream on this bench**, so treat it as experimental until you confirm it on your own setup.
 
 ### What it does
 
