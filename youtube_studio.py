@@ -330,6 +330,7 @@ def _throttled_state():
 # ── Live MJPEG preview ────────────────────────────────────────────────────────
 _prev_lock     = threading.Lock()
 _prev_frame    = None       # latest JPEG bytes
+_prev_frame_id = 0          # increments on each new JPEG so clients only send fresh frames
 _prev_clients  = 0          # number of browser tabs watching
 _prev_proc     = None       # capture subprocess
 _prev_cam_name = None       # name of camera being previewed
@@ -363,7 +364,7 @@ def _parse_mjpeg_frames(proc, on_frame):
             on_frame(frame)
 
 def _preview_worker(cam, quality):
-    global _prev_frame, _prev_proc, _prev_cam_name
+    global _prev_frame, _prev_frame_id, _prev_proc, _prev_cam_name
     log.info('Preview starting → %s', cam['name'])
     _prev_cam_name = cam['name']
 
@@ -405,9 +406,10 @@ def _preview_worker(cam, quality):
         _prev_proc = proc
 
     def _on_frame(jpeg):
-        global _prev_frame
+        global _prev_frame, _prev_frame_id
         with _prev_lock:
             _prev_frame = jpeg
+            _prev_frame_id += 1
 
     _parse_mjpeg_frames(proc, _on_frame)
     _terminate(proc)
@@ -432,11 +434,12 @@ def start_preview(cam):
     _prev_thread.start()
 
 def stop_preview():
-    global _prev_proc
+    global _prev_proc, _prev_frame
     _prev_stop_evt.set()
     with _prev_lock:
         proc = _prev_proc
         _prev_proc = None
+        _prev_frame = None
     _terminate(proc)
 
 
@@ -574,7 +577,6 @@ def _build_stream_cmds(cam, rtmp_url, otr_url, quality, msg_cfg):
 def _stream_worker(cam, rtmp_url, otr_url, quality):
     global _stream_proc_main, _stream_proc_libcam, _stream_state
 
-    MAX_RETRIES = 5
     retries = 0
     stall_checks = 0
     last_tx_bytes = None
@@ -602,12 +604,7 @@ def _stream_worker(cam, rtmp_url, otr_url, quality):
         retries += 1
         with _stream_lock:
             _stream_state['retries'] = retries
-        if retries > MAX_RETRIES:
-            log.error('Stream failed after %d retries', MAX_RETRIES)
-            with _stream_lock:
-                _stream_state['error'] = f'Failed after {MAX_RETRIES} retries'
-            return False
-        log.warning('%s — reconnect %d/%d', reason, retries, MAX_RETRIES)
+        log.warning('%s — reconnect %d', reason, retries)
         _terminate(lc)
         _terminate(ff)
         time.sleep(5)
@@ -1278,8 +1275,24 @@ var prevLbl = document.getElementById('prev-label');
 var overlay = document.getElementById('prev-overlay');
 var gridOn  = false;
 var camNames = {cam_names_json};
+var previewPaused = false;
+
+function setPreviewPaused(paused) {{
+  if (previewPaused === paused) return;
+  previewPaused = paused;
+  if (paused) {{
+    prevImg.removeAttribute('src');
+    prevImg.alt = 'Preview disabled while streaming';
+    prevLbl.textContent = 'Preview disabled while streaming';
+    overlay.innerHTML = '';
+    gridOn = false;
+  }} else {{
+    switchPreview();
+  }}
+}}
 
 function switchPreview() {{
+  if (previewPaused) return;
   var idx = camSel.value;
   prevImg.src = '/preview?cam=' + idx + '&t=' + Date.now();
   prevLbl.textContent = camNames[idx] + ' · 5fps';
@@ -1366,6 +1379,7 @@ function updateStatus() {{
     if (s.running) {{
       dot.className = 'live';
       txt.textContent = '● LIVE  ' + s.cam_name;
+      setPreviewPaused(true);
       var u = s.uptime_s;
       upt.textContent = '  ' + String(Math.floor(u/3600)).padStart(2,'0') + ':'
         + String(Math.floor((u%3600)/60)).padStart(2,'0') + ':'
@@ -1375,6 +1389,7 @@ function updateStatus() {{
     }} else {{
       dot.className = '';
       txt.textContent = s.error ? '✗ ' + s.error : 'Idle';
+      setPreviewPaused(false);
       upt.textContent = '';
       ret.textContent = '';
       document.getElementById('switch-cam-btn').style.display = 'none';
@@ -1932,6 +1947,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _serve_preview(self):
         """Stream MJPEG to the browser. Starts preview process if needed."""
+        with _stream_lock:
+            if _stream_state['running']:
+                self._send(409, b'Preview disabled while streaming', 'text/plain')
+                return
+
         qs = self.path.split('?', 1)[1] if '?' in self.path else ''
         qp = parse_qs(qs)
         try:
@@ -1947,17 +1967,20 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         log.info('Preview client connected → %s', cam['name'])
+        last_frame_id = -1
         try:
             while True:
                 with _prev_lock:
                     frame = _prev_frame
-                if frame:
+                    frame_id = _prev_frame_id
+                if frame and frame_id != last_frame_id:
                     try:
                         self.wfile.write(
                             b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
                             + frame + b'\r\n'
                         )
                         self.wfile.flush()
+                        last_frame_id = frame_id
                     except Exception:
                         break
                 else:
@@ -1968,6 +1991,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _serve_snapshot(self):
         """Serve a single JPEG frame from the current preview camera."""
+        with _stream_lock:
+            if _stream_state['running']:
+                self._send(409, b'Snapshot disabled while streaming', 'text/plain')
+                return
+
         qs = self.path.split('?', 1)[1] if '?' in self.path else ''
         qp = parse_qs(qs)
         try:

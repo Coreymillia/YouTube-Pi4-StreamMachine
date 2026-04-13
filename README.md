@@ -2,6 +2,8 @@
 
 A standalone YouTube live streaming daemon for the **Raspberry Pi 4** — built for a coin engraving workbench but usable for any close-up or studio stream. Browser-based web UI, live MJPEG focus preview, quality controls, mid-stream camera switching, and an optional YouTube Live Chat Bot. No LCD HAT, no physical buttons, no desktop environment required.
 
+Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
+
 ---
 
 ## Screenshots
@@ -42,13 +44,14 @@ A standalone YouTube live streaming daemon for the **Raspberry Pi 4** — built 
 
 - **Live MJPEG focus preview** at ~5 fps — adjust your lens while watching. No clicking, no refreshing.
 - **Single JPEG snapshot endpoint** for lightweight remote previews such as the CYD dashboard
+- **Preview isolation while live** — browser preview and snapshot are disabled during streaming so they do not consume the same uplink as YouTube
 - **Rule-of-thirds grid overlay** toggle for shot framing
 - **Camera auto-detection** — detects connected cameras at boot, defaults to HQ cam if available
 - **Safer camera switch** — switching cameras now does a clean stop/restart of the stream pipeline instead of an in-place hot-swap
 - **YouTube RTMP streaming** via `rpicam-vid` (HQ cam) or v4l2 H264 passthrough (USB cam)
 - **Quality controls** — Brightness, Contrast, Saturation, Sharpness, Zoom, and White Balance — applied live to preview and stream
 - **OTR Radio audio** — 12 Old Time Radio stations from the ROKiT Radio Network overlaid on the HQ cam stream, plus a **No Audio (Silent)** test option
-- **Auto-reconnect** — retries the stream up to 5 times on connection loss
+- **Auto-reconnect** — keeps retrying on connection loss instead of stopping after a fixed retry limit
 - **CYD companion display** — touch dashboard for stream state, Ethernet health, system temperature, and quick controls
 - **CYD snapshot mode** — lightweight still-image camera alignment view with manual refresh and timed auto-refresh
 - **YouTube Live Chat Bot** *(optional / not yet validated on this bench)* — included for headless messages, random timed messages, and keyword-triggered replies
@@ -132,7 +135,7 @@ http://<pi-ip>:8090
 - Toggle rule-of-thirds grid overlay
 - Refresh Preview button
 - Switching the camera dropdown automatically updates the preview
-- When the **HQ Camera** is live, its preview is paused so the CSI camera is not opened twice
+- Preview/snapshot are disabled while streaming so the uplink is reserved for YouTube
 
 ### Quality Controls
 All settings apply to both the live preview and the stream. Hit **Apply to Preview** to commit.
