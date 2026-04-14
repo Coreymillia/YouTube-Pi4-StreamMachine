@@ -28,6 +28,10 @@ Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
 ![CYD Snapshot Mode](IMG_20260412_175145104_HDR.jpg)
 *Snapshot mode on the CYD for quick alignment checks. It pulls a still JPEG from the Pi preview path and can auto-refresh or be refreshed manually from the touchscreen.*
 
+### YouTube Companion CYD
+![YouTube Companion CYD](IMG_20260414_162620026_HDR.jpg)
+*A dedicated CYD for the YouTube Companion service — showing authorized/ready state, no active broadcast yet, and the YouTube-side status cards before going live.*
+
 ---
 
 ## Hardware
