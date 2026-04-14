@@ -1,0 +1,17 @@
+[Unit]
+Description=YouTube Companion - Pi Zero YouTube status service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/coreymillia/youtube-companion/youtube_companion.py
+WorkingDirectory=/home/coreymillia/youtube-companion
+User=coreymillia
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

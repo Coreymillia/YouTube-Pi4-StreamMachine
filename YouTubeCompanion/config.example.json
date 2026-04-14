@@ -1,0 +1,8 @@
+{
+    "_comment": "Copy to config.json on the Pi Zero 2 W and fill in your Google OAuth TV/device-flow client credentials.",
+    "listen_host": "0.0.0.0",
+    "listen_port": 8091,
+    "poll_interval_seconds": 15,
+    "oauth_client_id": "",
+    "oauth_client_secret": ""
+}

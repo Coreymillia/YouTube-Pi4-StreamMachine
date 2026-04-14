@@ -120,6 +120,135 @@ http://<pi-ip>:8090
 
 ---
 
+## YouTube Companion (Pi Zero 2 W)
+
+The main Pi can now be paired with a separate **Pi Zero 2 W companion** that watches the **YouTube-side** view of the stream instead of the local encoder side. This is useful for answering questions like:
+
+- Is YouTube currently seeing the broadcast as **live**, **ready**, or **ended**?
+- Is the bound live stream currently **active**, **inactive**, or **noData**?
+- Is YouTube reporting stream-health issues or configuration warnings?
+
+The companion is intended to run separately from the encoder Pi so the main Pi stays focused on camera, audio, and RTMP upload.
+
+### Companion files
+
+| Path | Purpose |
+|---|---|
+| `YouTubeCompanion/youtube_companion.py` | Device-auth + YouTube polling service |
+| `YouTubeCompanion/config.example.json` | Example config for client ID/secret and listen port |
+| `YouTubeCompCYD/` | Dedicated CYD firmware for the companion Pi's `/status` + `/auth_status` APIs |
+| `INVERTYouTubeCompCYD/` | Inverted/touch-calibrated companion CYD firmware variant |
+| `systemd/youtube-companion.service` | Example systemd unit for the Pi Zero |
+
+### What it exposes
+
+- `GET /` — tiny local dashboard for auth + current YouTube status
+- `GET /status` — JSON summary for a future CYD or other client
+- `GET /auth_status` — current device-auth state
+- `POST /auth/start` — start Google device authorization
+- `POST /auth/clear` — clear saved token
+
+### Pi Zero setup
+
+```bash
+sudo apt update
+git clone https://github.com/Coreymillia/YouTube-Pi4-StreamMachine.git /home/coreymillia/youtube-companion-src
+mkdir -p /home/coreymillia/youtube-companion
+cp /home/coreymillia/youtube-companion-src/YouTubeCompanion/youtube_companion.py /home/coreymillia/youtube-companion/
+cp /home/coreymillia/youtube-companion-src/YouTubeCompanion/config.example.json /home/coreymillia/youtube-companion/config.json
+sudo cp /home/coreymillia/youtube-companion-src/systemd/youtube-companion.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now youtube-companion.service
+```
+
+Then open:
+
+```text
+http://<pi-zero-ip>:8091
+```
+
+Paste the OAuth client ID and secret, save them, and start device auth.
+
+> The companion uses **YouTube readonly scope** only. It is meant for **status/health polling**, not for controlling YouTube Studio or posting chat messages.
+
+### Google Auth Platform setup for the companion
+
+If Google says the app "**has not completed the Google verification process**", that usually means the OAuth app is not configured for testing with your account yet.
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), select the project that owns your companion client ID.
+2. Enable **YouTube Data API v3** for that project if it is not already enabled.
+3. Go to **Google Auth Platform**.
+4. Open **Branding**. If Google Auth Platform is not configured yet, click **Get started**.
+5. Fill in the basic app details:
+   - **App name**: anything you want, such as `YouTube Pi4 StreamMachine`
+   - **User support email**: your email
+   - **Audience**: **External**
+   - **Contact information**: your email
+6. Finish the setup and create the OAuth app.
+7. Open **Audience** and, under **Test users**, add the exact Google account that owns your YouTube channel.
+8. Open **Clients** and create an OAuth client of type **TVs and Limited Input devices**.
+9. Copy that client ID and client secret into the companion web UI and start device auth again.
+
+For the companion's readonly polling flow, **Testing + your account listed as a test user is enough**. Full Google verification is only needed if you want to distribute the app broadly to users outside your own test list.
+
+### Companion auth flow
+
+1. Open `http://<pi-zero-ip>:8091`
+2. Paste the **client ID** and **client secret**
+3. Click **Save Settings**
+4. Click **Start Device Auth**
+5. On another device, open [google.com/device](https://www.google.com/device)
+6. Sign in with the **same Google / YouTube account** that owns the channel
+7. Enter the code shown on the companion UI and approve access
+
+Once authorized, the companion will poll YouTube and show broadcast state, stream state, and configuration issues for your channel's current live setup.
+
+The companion starts polling automatically on boot. If you are **not currently live**, it may show **authorized** plus **no active broadcast** or an empty stream section; once the main encoder Pi starts sending to YouTube, the companion UI updates on its own.
+
+> **Auth lifetime note:** while your Google OAuth app is in **Testing**, Google may expire the companion authorization after about **7 days** for test users. If that happens, just start device auth again from the companion UI. The CYD does **not** perform Google OAuth itself.
+
+### Companion CYD firmware
+
+A separate CYD can now be dedicated to the YouTube-side view by flashing the firmware in `YouTubeCompCYD/`.
+
+If you are using the inverted CYD variant that matches the calibration from `CYDWiFiScanner/InvertedCYDWifiScanner`, use `INVERTYouTubeCompCYD/` instead.
+
+What it does:
+
+- Connects to the companion Pi on port `8091`
+- Shows whether the companion is online and authorized
+- Shows the current YouTube broadcast title/lifecycle/privacy state
+- Shows stream state, health, resolution, and first active issue
+- Includes an auth page that shows the current device code and can trigger `Start Device Auth` / `Clear Token`
+- Includes the same Wi-Fi captive portal pattern as the main `YouTubeCYD`
+
+To build and flash:
+
+```bash
+cd YouTubeCompCYD
+pio run
+pio run -t upload
+```
+
+On first boot, connect to the CYD setup AP:
+
+```text
+YouTubeCompCYD-Setup
+```
+
+Then enter your Wi-Fi details and the companion Pi hostname/IP, usually:
+
+```text
+Host: 192.168.0.129
+Port: 8091
+```
+
+The CYD stores its Wi-Fi and host settings locally, so this setup is typically **one-time per device** unless you clear settings, reflash, or change networks/hostnames.
+
+> **Screenshot safety:** avoid committing companion auth screenshots that show an active device code or client details. The CYD hardware photo is generally safe; the auth UI photo is better kept private unless fully redacted.
+
+---
+
 ## Dashboard Sections
 
 ### Stream Control
@@ -249,11 +378,12 @@ The bot uses the YouTube Data API v3 with OAuth2. Google requires a verified pro
 **Step 2 — Create OAuth2 credentials**
 1. Go to **APIs & Services → Credentials**
 2. Click **+ Create Credentials → OAuth 2.0 Client ID**
-3. If prompted to configure the consent screen first:
-   - User type: **External**
-   - Fill in app name (anything), your email, save and continue through the rest
-   - On the **Scopes** screen you can skip adding scopes here
-   - On the **Test users** screen, add your YouTube account email
+3. If prompted to configure auth first, Google may now send you to **Google Auth Platform** instead of the older **OAuth consent screen** page:
+   - Open **Branding** and click **Get started** if needed
+   - Set an app name, support email, and contact email
+   - Set **Audience** to **External**
+   - Save the app
+   - Open **Audience** and add your YouTube account email under **Test users**
 4. Back at Create Credentials → OAuth 2.0 Client ID:
    - Application type: **TV and Limited Input devices** ← this is critical, do NOT choose "Web application"
    - Name it anything (e.g. `YouTube-Pi Bot`)
@@ -273,6 +403,8 @@ The bot uses the YouTube Data API v3 with OAuth2. Google requires a verified pro
 8. Grant the permissions → the UI will show ✓ Authorized
 
 Tokens are saved to `token.json` on the Pi. You won't need to re-authorize unless you revoke access.
+
+If Google says the app has "**not completed the Google verification process**", make sure the Google account you are signing into has been added under **Google Auth Platform → Audience → Test users** for the same Cloud project that owns the client ID.
 
 **Step 4 — Configure the bot**
 - **Headless Message** — posted once when stream goes live
