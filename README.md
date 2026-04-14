@@ -36,11 +36,18 @@ Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
 
 ## Hardware
 
+**Required for the main streamer**
+
 - **Raspberry Pi 4 Model B**
 - **Raspberry Pi HQ Camera (IMX477)** — connected via CSI ribbon to the CAM/DISP 0 port (closest to USB-C power)
 - **C-mount lens support** — the HQ Camera can use any compatible C-mount lens, so the build is not limited to the engraving lens shown in the photos
-- **USB Microscope Camera** — optional, plug-and-play (H264 capable recommended)
-- Optional: Bluetooth keyboard for SSH/terminal access without a screen
+
+**Optional add-ons**
+
+- **USB Microscope Camera** — plug-and-play alternate camera source (H264 capable recommended)
+- **Raspberry Pi Zero 2 W** — optional companion Pi for YouTube-side broadcast/health polling
+- **1 to 2 Cheap Yellow Displays (CYD / ESP32-2432S028)** — optional touch dashboards for the main Pi, the companion Pi, or both
+- Bluetooth keyboard for SSH/terminal access without a screen
 
 ---
 
