@@ -321,8 +321,6 @@ def _poll_once():
             'liveBroadcasts',
             {
                 'part': 'snippet,status,contentDetails',
-                'broadcastStatus': 'all',
-                'broadcastType': 'all',
                 'mine': 'true',
                 'maxResults': 10,
             },
