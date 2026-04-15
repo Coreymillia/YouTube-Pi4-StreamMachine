@@ -143,23 +143,22 @@ static const char* statusLabel() {
     return "NO AUTH";
 }
 
-static void drawHeader() {
+static void drawHeader(bool show_portal) {
     gfx->fillRect(0, 0, W, HDR_H, C_BLUE);
     gfx->setTextColor(C_WHITE, C_BLUE);
     gfx->setTextSize(2);
     gfx->setCursor(8, 7);
     gfx->print("YTC");
-    drawButton(btnStatus);
     drawButton(btnAuth);
     drawButton(btnRefresh);
-    drawButton(btnPortal);
+    if (show_portal) drawButton(btnPortal);
     gfx->fillCircle(304, 14, 4, comp_status.api_online ? C_GREEN : C_RED);
     gfx->drawCircle(304, 14, 4, C_WHITE);
 }
 
 static void drawStatusScreen() {
     gfx->fillScreen(C_BG);
-    drawHeader();
+    drawHeader(false);
 
     uint16_t state_col = statusColor();
     gfx->fillRoundRect(8, 36, 96, 52, 8, state_col);
@@ -206,15 +205,19 @@ static void drawStatusScreen() {
     gfx->drawRoundRect(164, 96, 148, 50, 8, C_DIM);
     gfx->setTextColor(C_CYAN, C_CARD);
     gfx->setCursor(174, 106);
-    gfx->print("VIDEO / TIME");
+    gfx->print("AUDIENCE");
     gfx->setTextColor(C_WHITE, C_CARD);
     gfx->setCursor(174, 120);
-    gfx->print(strlen(comp_status.resolution) ? comp_status.resolution : "-");
-    gfx->print(" / ");
-    gfx->print(strlen(comp_status.frame_rate) ? comp_status.frame_rate : "-");
-    gfx->setCursor(174, 132);
-    gfx->print("start: ");
-    gfx->print(strlen(comp_status.started_at) ? comp_status.started_at : "-");
+    gfx->print("views: ");
+    if (comp_status.views >= 0) gfx->print(comp_status.views);
+    else gfx->print("-");
+    gfx->setCursor(174, 131);
+    gfx->print("avg: ");
+    gfx->print(strlen(comp_status.average_view_duration) ? comp_status.average_view_duration : "-");
+    gfx->setCursor(174, 142);
+    gfx->print("ccv: ");
+    if (comp_status.concurrent_viewers >= 0) gfx->print(comp_status.concurrent_viewers);
+    else gfx->print("-");
 
     gfx->fillRoundRect(8, 154, 304, 46, 8, C_CARD);
     gfx->drawRoundRect(8, 154, 304, 46, 8, C_DIM);
@@ -238,6 +241,8 @@ static void drawStatusScreen() {
         drawWrapped(g_action_msg, 8, 226, 50, C_CYAN, C_BG, 1);
     } else if (strlen(comp_status.api_error)) {
         drawWrapped(comp_status.api_error, 8, 226, 50, C_ORANGE, C_BG, 1);
+    } else if (strlen(comp_status.audience_note)) {
+        drawWrapped(comp_status.audience_note, 8, 226, 50, C_YELLOW, C_BG, 1);
     } else {
         gfx->print(WiFi.localIP());
         gfx->print(" -> ");
@@ -249,7 +254,7 @@ static void drawStatusScreen() {
 
 static void drawAuthScreen() {
     gfx->fillScreen(C_BG);
-    drawHeader();
+    drawHeader(true);
 
     gfx->fillRoundRect(8, 36, 148, 54, 8, C_CARD);
     gfx->drawRoundRect(8, 36, 148, 54, 8, C_DIM);
@@ -361,16 +366,13 @@ void loop() {
         int sx, sy;
         mapTouch(p.x, p.y, sx, sy);
 
-        if (inButton(btnStatus, sx, sy)) {
-            current_screen = SCREEN_STATUS;
-            screen_dirty = true;
-        } else if (inButton(btnAuth, sx, sy)) {
-            current_screen = SCREEN_AUTH;
+        if (inButton(btnAuth, sx, sy)) {
+            current_screen = (current_screen == SCREEN_AUTH) ? SCREEN_STATUS : SCREEN_AUTH;
             screen_dirty = true;
         } else if (inButton(btnRefresh, sx, sy)) {
             if (ytCompFetchStatus(pt_comp_host, pt_comp_port)) setAction("Refreshed");
             else setAction("Refresh failed");
-        } else if (inButton(btnPortal, sx, sy)) {
+        } else if (current_screen == SCREEN_AUTH && inButton(btnPortal, sx, sy)) {
             setAction("Opening portal...");
             delay(500);
             ptClearSettings();

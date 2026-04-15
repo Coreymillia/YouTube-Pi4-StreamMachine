@@ -158,7 +158,7 @@ The companion is intended to run separately from the encoder Pi so the main Pi s
 ### What it exposes
 
 - `GET /` — tiny local dashboard for auth + current YouTube status
-- `GET /status` — JSON summary for a future CYD or other client
+- `GET /status` — JSON summary for a future CYD or other client, including stream health plus audience metrics such as views
 - `GET /auth_status` — current device-auth state
 - `POST /auth/start` — start Google device authorization
 - `POST /auth/clear` — clear saved token
@@ -202,7 +202,8 @@ If Google says the app "**has not completed the Google verification process**", 
 6. Finish the setup and create the OAuth app.
 7. Open **Audience** and, under **Test users**, add the exact Google account that owns your YouTube channel.
 8. Open **Clients** and create an OAuth client of type **TVs and Limited Input devices**.
-9. Copy that client ID and client secret into the companion web UI and start device auth again.
+9. If you want **average view duration** metrics, also enable **YouTube Analytics API** for that same project.
+10. Copy that client ID and client secret into the companion web UI and start device auth again.
 
 For the companion's readonly polling flow, **Testing + your account listed as a test user is enough**. Full Google verification is only needed if you want to distribute the app broadly to users outside your own test list.
 
@@ -217,6 +218,8 @@ For the companion's readonly polling flow, **Testing + your account listed as a 
 7. Enter the code shown on the companion UI and approve access
 
 Once authorized, the companion will poll YouTube and show broadcast state, stream state, and configuration issues for your channel's current live setup.
+
+Views can be shown from the normal YouTube Data API. **Average view duration** requires **YouTube Analytics API** to be enabled in the same Google Cloud project. If that API is disabled, the companion still works, but it will show a note that average view duration is unavailable until Analytics is enabled.
 
 The companion starts polling automatically on boot. If you are **not currently live**, it may show **authorized** plus **no active broadcast** or an empty stream section; once the main encoder Pi starts sending to YouTube, the companion UI updates on its own.
 
@@ -233,7 +236,7 @@ What it does:
 - Connects to the companion Pi on port `8091`
 - Shows whether the companion is online and authorized
 - Shows the current YouTube broadcast title/lifecycle/privacy state
-- Shows stream state, health, resolution, and first active issue
+- Shows stream state, health, views, average view duration, and first active issue
 - Includes an auth page that shows the current device code and can trigger `Start Device Auth` / `Clear Token`
 - Includes the same Wi-Fi captive portal pattern as the main `YouTubeCYD`
 

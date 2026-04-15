@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -33,6 +34,7 @@ _TOKEN_PATH = os.path.join(_PROJECT_DIR, 'token.json')
 _DEVICE_CODE_URL = 'https://oauth2.googleapis.com/device/code'
 _OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 _YT_API = 'https://www.googleapis.com/youtube/v3'
+_YT_ANALYTICS_API = 'https://youtubeanalytics.googleapis.com/v2'
 
 _DEFAULTS = {
     'listen_host': '0.0.0.0',
@@ -251,6 +253,113 @@ def _api_get(cfg, path, params):
     return _http_json(f'{_YT_API}/{path}', params=params, headers=headers)
 
 
+def _analytics_get(cfg, params):
+    headers = _yt_headers(cfg)
+    if not headers:
+        raise RuntimeError('Not authorized')
+    return _http_json(f'{_YT_ANALYTICS_API}/reports', params=params, headers=headers)
+
+
+def _google_error_message(exc):
+    try:
+        data = json.loads(exc.read().decode() or '{}')
+    except Exception:
+        return str(exc)
+    return ((data.get('error') or {}).get('message') or str(exc)).strip()
+
+
+def _friendly_analytics_message(message):
+    lower = message.lower()
+    if 'youtube analytics api has not been used' in lower or 'youtubeanalytics.googleapis.com' in lower:
+        return 'Enable YouTube Analytics API for avg view duration'
+    if 'insufficient authentication scopes' in lower or 'insufficientpermissions' in lower:
+        return 'Reauthorize companion for analytics access'
+    if 'forbidden' in lower or 'permission denied' in lower:
+        return 'Analytics access denied'
+    return 'Average view duration unavailable'
+
+
+def _rfc3339_date(value):
+    if not value:
+        return datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    return value[:10]
+
+
+def _format_duration(seconds):
+    if seconds is None:
+        return ''
+    total = max(0, int(round(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f'{hours}:{minutes:02d}:{secs:02d}'
+    return f'{minutes}:{secs:02d}'
+
+
+def _fetch_video_metrics(cfg, video_id):
+    items = _api_get(
+        cfg,
+        'videos',
+        {
+            'part': 'statistics,liveStreamingDetails',
+            'id': video_id,
+            'maxResults': 1,
+        },
+    ).get('items', [])
+    return items[0] if items else None
+
+
+def _fetch_audience_metrics(cfg, video_id, started_at, ended_at):
+    audience = {
+        'views': None,
+        'average_view_duration_seconds': None,
+        'average_view_duration_label': '',
+        'concurrent_viewers': None,
+        'note': '',
+    }
+    if not video_id:
+        return audience
+
+    video = _fetch_video_metrics(cfg, video_id)
+    stats = (video or {}).get('statistics') or {}
+    live = (video or {}).get('liveStreamingDetails') or {}
+    if 'viewCount' in stats:
+        audience['views'] = int(stats.get('viewCount') or 0)
+    if 'concurrentViewers' in live:
+        audience['concurrent_viewers'] = int(live.get('concurrentViewers') or 0)
+
+    try:
+        report = _analytics_get(
+            cfg,
+            {
+                'ids': 'channel==MINE',
+                'startDate': _rfc3339_date(started_at),
+                'endDate': _rfc3339_date(ended_at),
+                'metrics': 'views,averageViewDuration',
+                'filters': f'video=={video_id}',
+            },
+        )
+    except urllib.error.HTTPError as exc:
+        audience['note'] = _friendly_analytics_message(_google_error_message(exc))
+        return audience
+    except Exception:
+        audience['note'] = 'Average view duration unavailable'
+        return audience
+
+    rows = report.get('rows') or []
+    if not rows:
+        audience['note'] = 'Analytics not ready yet'
+        return audience
+
+    row = rows[0]
+    if len(row) >= 1:
+        audience['views'] = int(row[0])
+    if len(row) >= 2:
+        audience['average_view_duration_seconds'] = int(round(float(row[1])))
+        audience['average_view_duration_label'] = _format_duration(audience['average_view_duration_seconds'])
+    return audience
+
+
 def _broadcast_rank(item):
     status = (item.get('status') or {}).get('lifeCycleStatus', '')
     order = {
@@ -292,6 +401,7 @@ _status = {
     'error': '',
     'broadcast': None,
     'stream': None,
+    'audience': None,
     'issues': [],
 }
 
@@ -312,6 +422,7 @@ def _poll_once():
             _status['error'] = 'Authorize this companion to read YouTube status'
             _status['broadcast'] = None
             _status['stream'] = None
+            _status['audience'] = None
             _status['issues'] = []
         return
 
@@ -353,6 +464,12 @@ def _poll_once():
             ).get('items', [])
             stream = _select_stream(streams)
 
+        audience = _fetch_audience_metrics(
+            cfg,
+            (broadcast or {}).get('id', ''),
+            ((broadcast or {}).get('snippet') or {}).get('actualStartTime', ''),
+            ((broadcast or {}).get('snippet') or {}).get('actualEndTime', ''),
+        )
         issues = (((stream or {}).get('status') or {}).get('healthStatus') or {}).get('configurationIssues') or []
 
         with _status_lock:
@@ -377,6 +494,7 @@ def _poll_once():
                 'frame_rate': ((stream or {}).get('cdn') or {}).get('frameRate', ''),
                 'ingestion_type': ((stream or {}).get('cdn') or {}).get('ingestionType', ''),
             } if stream else None
+            _status['audience'] = audience
             _status['issues'] = issues
     except Exception as exc:
         log.error('YouTube poll failed: %s', exc)
@@ -444,6 +562,12 @@ _HTML = """<!DOCTYPE html>
       <div class="row"><span class="label">Last Update</span> <span id="health-updated"></span></div>
       <div class="row bad" id="status-error"></div>
     </div>
+    <div class="card">
+      <div class="row"><span class="label">Views</span> <span id="audience-views"></span></div>
+      <div class="row"><span class="label">Avg View Duration</span> <span id="audience-avd"></span></div>
+      <div class="row"><span class="label">Concurrent Viewers</span> <span id="audience-ccv"></span></div>
+      <div class="row warn" id="audience-note"></div>
+    </div>
     <div class="card" style="grid-column:1/-1">
       <div class="row"><span class="label">Configuration Issues</span></div>
       <ul id="issues"></ul>
@@ -492,6 +616,10 @@ _HTML = """<!DOCTYPE html>
         text('health-status', s.stream ? s.stream.health_status : '');
         text('video-mode', s.stream ? ((s.stream.resolution || '-') + ' / ' + (s.stream.frame_rate || '-')) : '');
         text('health-updated', s.stream ? s.stream.health_last_update : '');
+        text('audience-views', s.audience && s.audience.views != null ? s.audience.views : '');
+        text('audience-avd', s.audience ? s.audience.average_view_duration_label : '');
+        text('audience-ccv', s.audience && s.audience.concurrent_viewers != null ? s.audience.concurrent_viewers : '');
+        text('audience-note', s.audience ? s.audience.note : '');
         const issues = document.getElementById('issues');
         issues.innerHTML = '';
         (s.issues || []).forEach(issue => {

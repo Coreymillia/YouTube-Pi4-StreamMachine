@@ -23,6 +23,10 @@ struct CompanionStatus {
     char health_status[20] = "";
     char resolution[16] = "";
     char frame_rate[16] = "";
+    long views = -1;
+    int concurrent_viewers = -1;
+    char average_view_duration[16] = "";
+    char audience_note[96] = "";
     int issue_count = 0;
     char issue_type[32] = "";
     char issue_text[128] = "";
@@ -77,6 +81,12 @@ static bool ytCompFetchStatus(const char* host, uint16_t port) {
         strlcpy(comp_status.health_status, stream["health_status"] | "", sizeof(comp_status.health_status));
         strlcpy(comp_status.resolution, stream["resolution"] | "", sizeof(comp_status.resolution));
         strlcpy(comp_status.frame_rate, stream["frame_rate"] | "", sizeof(comp_status.frame_rate));
+
+        JsonObject audience = status_doc["audience"].as<JsonObject>();
+        comp_status.views = audience["views"].isNull() ? -1 : audience["views"].as<long>();
+        comp_status.concurrent_viewers = audience["concurrent_viewers"].isNull() ? -1 : audience["concurrent_viewers"].as<int>();
+        strlcpy(comp_status.average_view_duration, audience["average_view_duration_label"] | "", sizeof(comp_status.average_view_duration));
+        strlcpy(comp_status.audience_note, audience["note"] | "", sizeof(comp_status.audience_note));
 
         comp_status.issue_count = 0;
         comp_status.issue_type[0] = '\0';
