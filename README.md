@@ -32,6 +32,10 @@ Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
 ![YouTube Companion CYD](IMG_20260414_162620026_HDR.jpg)
 *A dedicated CYD for the YouTube Companion service — showing authorized/ready state, no active broadcast yet, and the YouTube-side status cards before going live.*
 
+### YouTube Companion CYD Warning View
+![YouTube Companion CYD Warning View](IMG_20260414_231044655_HDR.jpg)
+*The companion CYD while live — showing the current broadcast, active stream state, and a YouTube-side ingest warning surfaced directly on the dashboard.*
+
 ---
 
 ## Hardware
