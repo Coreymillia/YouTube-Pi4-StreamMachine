@@ -14,6 +14,7 @@ import json
 import math
 import os
 import random
+import signal
 import socket
 import time
 import urllib.error
@@ -125,6 +126,16 @@ def _derive_mode(status, auth, fetch_error):
     return 'ready'
 
 
+def _resolve_display_mode(base_mode, idle_since, now, idle_seconds):
+    if base_mode == 'ready':
+        if idle_since is None:
+            idle_since = now
+        if now - idle_since >= idle_seconds:
+            return 'idle', idle_since
+        return 'ready', idle_since
+    return base_mode, None
+
+
 class DotField:
     def __init__(self, width, height, count):
         self.width = width
@@ -183,6 +194,77 @@ class DotField:
             pygame.draw.circle(surface, color, (int(dot['x']), int(dot['y'])), dot['radius'])
 
 
+class MatrixRain:
+    _CHARS = '01[]{}<>/\\+-=*#@!?$%&'
+
+    def __init__(self, width, height, cell_width=16, cell_height=18):
+        self.width = width
+        self.height = height
+        self.cell_width = max(10, cell_width)
+        self.cell_height = max(12, cell_height)
+        self._build_streams()
+
+    def _build_streams(self):
+        self.columns = max(12, self.width // self.cell_width)
+        self.streams = [self._spawn(col, initial=True) for col in range(self.columns)]
+
+    def resize(self, width, height):
+        self.width = width
+        self.height = height
+        self._build_streams()
+
+    def _spawn(self, col, initial=False):
+        length = random.randint(10, 22)
+        head_y = random.uniform(-self.height * 0.8, self.height if initial else 0)
+        return {
+            'col': col,
+            'head_y': head_y,
+            'speed': random.uniform(42, 92),
+            'length': length,
+            'chars': [random.choice(self._CHARS) for _ in range(length + 6)],
+            'last_row': int(head_y // self.cell_height),
+            'mutate_timer': random.uniform(0.02, 0.18),
+        }
+
+    def update(self, dt):
+        for idx, stream in enumerate(self.streams):
+            stream['head_y'] += stream['speed'] * dt
+            stream['mutate_timer'] -= dt
+            if stream['mutate_timer'] <= 0:
+                replace_at = random.randrange(len(stream['chars']))
+                stream['chars'][replace_at] = random.choice(self._CHARS)
+                stream['mutate_timer'] = random.uniform(0.04, 0.22)
+
+            row = int(stream['head_y'] // self.cell_height)
+            if row != stream['last_row']:
+                stream['chars'].insert(0, random.choice(self._CHARS))
+                del stream['chars'][-1]
+                stream['last_row'] = row
+
+            if stream['head_y'] - (stream['length'] * self.cell_height) > self.height + self.cell_height:
+                self.streams[idx] = self._spawn(stream['col'])
+
+    def glyphs(self):
+        for stream in self.streams:
+            col_x = stream['col'] * self.cell_width + 6
+            head_row = int(stream['head_y'] // self.cell_height)
+            for offset in range(stream['length']):
+                row = head_row - offset
+                if row < 0:
+                    continue
+                y = row * self.cell_height
+                if y >= self.height:
+                    continue
+                if offset == 0:
+                    color = (186, 255, 190)
+                elif offset == 1:
+                    color = (110, 240, 126)
+                else:
+                    fade = max(0.12, 1.0 - (offset / max(1, stream['length'])))
+                    color = (0, int(160 * fade) + 10, 0)
+                yield col_x, y, stream['chars'][offset], color
+
+
 class CompanionScreen:
     def __init__(self, args):
         self.args = args
@@ -204,8 +286,10 @@ class CompanionScreen:
         self.fetch_error = ''
         self.last_refresh = 0.0
         self.last_ok = 0.0
+        self.idle_since = None
 
         self.dots = DotField(self.width, self.height, max(120, (self.width * self.height) // 18000))
+        self.matrix = MatrixRain(self.width, self.height)
         self._build_fonts()
 
     def _init_display(self):
@@ -244,6 +328,7 @@ class CompanionScreen:
         self.font_section = pygame.font.SysFont('dejavusansmono', max(18, short_edge // 34), bold=True)
         self.font_text = pygame.font.SysFont('dejavusansmono', max(16, short_edge // 42))
         self.font_small = pygame.font.SysFont('dejavusansmono', max(14, short_edge // 54))
+        self.font_matrix = pygame.font.SysFont('dejavusansmono', max(14, short_edge // 30), bold=True)
         self.font_code = pygame.font.SysFont('dejavusansmono', max(34, short_edge // 11), bold=True)
 
     def _refresh_if_needed(self):
@@ -265,6 +350,7 @@ class CompanionScreen:
             'offline': (100, 140, 190),
             'auth': (255, 196, 86),
             'ready': (78, 195, 255),
+            'idle': (78, 185, 104),
             'live': (92, 220, 132),
             'warning': (255, int(120 + 70 * pulse), 90),
         }
@@ -275,6 +361,7 @@ class CompanionScreen:
             'offline': 'OFFLINE',
             'auth': 'AUTH',
             'ready': 'READY',
+            'idle': 'IDLE',
             'live': 'LIVE',
             'warning': 'WARNING',
         }[mode]
@@ -437,6 +524,30 @@ class CompanionScreen:
         self.screen.blit(panel, footer_rect.topleft)
         self._draw_text(_clip(line, 120), self.font_text, (232, 236, 240), footer_rect.x + 16, footer_rect.y + 10)
 
+    def _draw_idle_screen(self):
+        now_text = datetime.now().strftime('%H:%M')
+        sub_text = datetime.now().strftime('%a %b %d')
+        self.screen.fill((0, 5, 0))
+        self.matrix.update(1.0 / max(1, self.args.fps))
+        for x, y, char, color in self.matrix.glyphs():
+            glyph = self.font_matrix.render(char, True, color)
+            self.screen.blit(glyph, (x, y))
+
+        plate = pygame.Surface((190, 64), pygame.SRCALPHA)
+        plate.fill((2, 10, 2, 210))
+        pygame.draw.rect(plate, (36, 120, 52, 220), plate.get_rect(), width=1, border_radius=14)
+        self.screen.blit(plate, (self.width - 208, 18))
+        clock = self.font_title.render(now_text, True, (198, 248, 200))
+        date = self.font_small.render(sub_text, True, (118, 180, 126))
+        self.screen.blit(clock, (self.width - 190, 22))
+        self.screen.blit(date, (self.width - 188, 52))
+
+        bottom = pygame.Surface((320, 44), pygame.SRCALPHA)
+        bottom.fill((2, 8, 2, 205))
+        pygame.draw.rect(bottom, (30, 100, 42, 220), bottom.get_rect(), width=1, border_radius=12)
+        self.screen.blit(bottom, (18, self.height - 62))
+        self._draw_text('READY  Waiting for next stream', self.font_text, (150, 220, 158), 34, self.height - 51)
+
     def _draw_layout(self, mode):
         accent = self._accent(mode)
         top = int(self.height * 0.18)
@@ -533,22 +644,32 @@ class CompanionScreen:
                     self.screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
                     self.width, self.height = self.screen.get_size()
                     self.dots.resize(self.width, self.height)
+                    self.matrix.resize(self.width, self.height)
                     self._build_fonts()
 
             self._refresh_if_needed()
-            mode = _derive_mode(self.status, self.auth, self.fetch_error)
+            base_mode = _derive_mode(self.status, self.auth, self.fetch_error)
+            mode, self.idle_since = _resolve_display_mode(
+                base_mode,
+                self.idle_since,
+                time.time(),
+                self.args.idle_seconds,
+            )
 
-            self.screen.fill((2, 4, 8))
-            self.dots.update(dt, mode)
-            self.dots.draw(self.screen, mode, time.time())
-            overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 118 if mode in {'ready', 'auth'} else 134))
-            self.screen.blit(overlay, (0, 0))
+            if mode == 'idle':
+                self._draw_idle_screen()
+            else:
+                self.screen.fill((2, 4, 8))
+                self.dots.update(dt, mode)
+                self.dots.draw(self.screen, mode, time.time())
+                overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                overlay.fill((0, 0, 0, 118 if mode in {'ready', 'auth'} else 134))
+                self.screen.blit(overlay, (0, 0))
 
-            self._draw_header(mode)
-            self._draw_auth_code()
-            self._draw_layout(mode)
-            self._draw_footer(mode)
+                self._draw_header(mode)
+                self._draw_auth_code()
+                self._draw_layout(mode)
+                self._draw_footer(mode)
             pygame.display.flip()
 
 
@@ -573,7 +694,9 @@ class FramebufferScreen:
         self.fetch_error = ''
         self.last_refresh = 0.0
         self.last_ok = 0.0
+        self.idle_since = None
         self.dots = DotField(self.width, self.height, max(90, (self.width * self.height) // 22000))
+        self.matrix = MatrixRain(self.width, self.height)
         self._build_fonts()
 
     def _read_fb_info(self):
@@ -602,6 +725,7 @@ class FramebufferScreen:
         self.font_section = self._font(max(18, short_edge // 32))
         self.font_text = self._font(max(15, short_edge // 40))
         self.font_small = self._font(max(13, short_edge // 52))
+        self.font_matrix = self._font(max(14, short_edge // 30))
         self.font_code = self._font(max(30, short_edge // 10))
 
     def _refresh_if_needed(self):
@@ -623,6 +747,7 @@ class FramebufferScreen:
             'offline': (100, 140, 190),
             'auth': (255, 196, 86),
             'ready': (78, 195, 255),
+            'idle': (78, 185, 104),
             'live': (92, 220, 132),
             'warning': (255, int(120 + 70 * pulse), 90),
         }
@@ -633,6 +758,7 @@ class FramebufferScreen:
             'offline': 'OFFLINE',
             'auth': 'AUTH',
             'ready': 'READY',
+            'idle': 'IDLE',
             'live': 'LIVE',
             'warning': 'WARNING',
         }[mode]
@@ -766,62 +892,85 @@ class FramebufferScreen:
         self.fb.seek(0)
         self.fb.write(raw)
 
+    def _draw_idle_frame(self, image, draw):
+        now_text = datetime.now().strftime('%H:%M')
+        sub_text = datetime.now().strftime('%a %b %d')
+        self.matrix.update(1.0 / max(1, min(self.args.fps, 12)))
+        for x, y, char, color in self.matrix.glyphs():
+            draw.text((x, y), char, font=self.font_matrix, fill=color)
+
+        draw.rounded_rectangle((self.width - 206, 18, self.width - 18, 80), radius=14, fill=(2, 10, 2), outline=(36, 120, 52), width=1)
+        draw.text((self.width - 186, 20), now_text, font=self.font_title, fill=(198, 248, 200))
+        draw.text((self.width - 184, 50), sub_text, font=self.font_small, fill=(118, 180, 126))
+        draw.rounded_rectangle((18, self.height - 62, 338, self.height - 18), radius=12, fill=(2, 8, 2), outline=(30, 100, 42), width=1)
+        draw.text((34, self.height - 50), 'READY  Waiting for next stream', font=self.font_text, fill=(150, 220, 158))
+
     def run(self):
         frame_delay = 1.0 / max(1, min(self.args.fps, 12))
         while True:
             started = time.time()
             self._refresh_if_needed()
-            mode = _derive_mode(self.status, self.auth, self.fetch_error)
+            base_mode = _derive_mode(self.status, self.auth, self.fetch_error)
+            mode, self.idle_since = _resolve_display_mode(
+                base_mode,
+                self.idle_since,
+                time.time(),
+                self.args.idle_seconds,
+            )
 
             image = self.Image.new('RGB', (self.width, self.height), (2, 4, 8))
             draw = self.ImageDraw.Draw(image)
-            self.dots.update(frame_delay, mode)
-            for dot in self.dots.dots:
-                blend = 0.5 + 0.5 * math.sin(time.time() * 0.7 + dot['phase'] + dot['color_shift'] * math.pi)
-                color_a, color_b = {
-                    'offline': ((50, 90, 140), (110, 140, 180)),
-                    'auth': ((120, 170, 240), (255, 210, 110)),
-                    'ready': ((0, 220, 160), (70, 190, 255)),
-                    'live': ((0, 190, 120), (60, 150, 235)),
-                    'warning': ((255, 120, 80), (255, 210, 90)),
-                }.get(mode, ((0, 220, 160), (70, 190, 255)))
-                color = (
-                    int(color_a[0] * (1 - blend) + color_b[0] * blend),
-                    int(color_a[1] * (1 - blend) + color_b[1] * blend),
-                    int(color_a[2] * (1 - blend) + color_b[2] * blend),
-                )
-                r = dot['radius']
-                draw.ellipse((dot['x'] - r, dot['y'] - r, dot['x'] + r, dot['y'] + r), fill=color)
+            if mode == 'idle':
+                image.paste((0, 5, 0), (0, 0, self.width, self.height))
+                self._draw_idle_frame(image, draw)
+            else:
+                self.dots.update(frame_delay, mode)
+                for dot in self.dots.dots:
+                    blend = 0.5 + 0.5 * math.sin(time.time() * 0.7 + dot['phase'] + dot['color_shift'] * math.pi)
+                    color_a, color_b = {
+                        'offline': ((50, 90, 140), (110, 140, 180)),
+                        'auth': ((120, 170, 240), (255, 210, 110)),
+                        'ready': ((0, 220, 160), (70, 190, 255)),
+                        'live': ((0, 190, 120), (60, 150, 235)),
+                        'warning': ((255, 120, 80), (255, 210, 90)),
+                    }.get(mode, ((0, 220, 160), (70, 190, 255)))
+                    color = (
+                        int(color_a[0] * (1 - blend) + color_b[0] * blend),
+                        int(color_a[1] * (1 - blend) + color_b[1] * blend),
+                        int(color_a[2] * (1 - blend) + color_b[2] * blend),
+                    )
+                    r = dot['radius']
+                    draw.ellipse((dot['x'] - r, dot['y'] - r, dot['x'] + r, dot['y'] + r), fill=color)
 
-            accent = self._accent(mode)
-            now_text = datetime.now().strftime('%H:%M:%S')
-            draw.text((18, 14), 'YouTube Companion HDMI', font=self.font_title, fill=(232, 244, 255))
-            mode_w, _ = self._text_size(draw, self._mode_label(mode), self.font_mode)
-            draw.text((self.width - mode_w - 18, 10), self._mode_label(mode), font=self.font_mode, fill=accent)
-            time_w, _ = self._text_size(draw, now_text, self.font_small)
-            draw.text((self.width - time_w - 18, 56), now_text, font=self.font_small, fill=(180, 198, 214))
-            draw.text((18, 50), self.args.web_url, font=self.font_small, fill=(148, 165, 180))
+                accent = self._accent(mode)
+                now_text = datetime.now().strftime('%H:%M:%S')
+                draw.text((18, 14), 'YouTube Companion HDMI', font=self.font_title, fill=(232, 244, 255))
+                mode_w, _ = self._text_size(draw, self._mode_label(mode), self.font_mode)
+                draw.text((self.width - mode_w - 18, 10), self._mode_label(mode), font=self.font_mode, fill=accent)
+                time_w, _ = self._text_size(draw, now_text, self.font_small)
+                draw.text((self.width - time_w - 18, 56), now_text, font=self.font_small, fill=(180, 198, 214))
+                draw.text((18, 50), self.args.web_url, font=self.font_small, fill=(148, 165, 180))
 
-            if self.auth.get('pending'):
-                code = self.auth.get('user_code') or '---- ----'
-                code_w, code_h = self._text_size(draw, code, self.font_code)
-                code_x = (self.width - code_w) // 2
-                code_y = int(self.height * 0.16)
-                draw.rounded_rectangle((code_x - 20, code_y - 8, code_x + code_w + 20, code_y + code_h + 12), radius=14, fill=(40, 32, 8), outline=(255, 214, 120), width=2)
-                draw.text((code_x, code_y), code, font=self.font_code, fill=(255, 232, 176))
+                if self.auth.get('pending'):
+                    code = self.auth.get('user_code') or '---- ----'
+                    code_w, code_h = self._text_size(draw, code, self.font_code)
+                    code_x = (self.width - code_w) // 2
+                    code_y = int(self.height * 0.16)
+                    draw.rounded_rectangle((code_x - 20, code_y - 8, code_x + code_w + 20, code_y + code_h + 12), radius=14, fill=(40, 32, 8), outline=(255, 214, 120), width=2)
+                    draw.text((code_x, code_y), code, font=self.font_code, fill=(255, 232, 176))
 
-            top = 110 if not self.auth.get('pending') else 170
-            gap = 14
-            left_w = 386
-            right_w = self.width - left_w - gap - 36
-            self._draw_card(draw, (18, top, left_w, 142), 'SUMMARY', self._summary_lines(mode), accent)
-            self._draw_card(draw, (18 + left_w + gap, top, right_w, 142), 'AUDIENCE', self._audience_lines(mode), accent)
-            self._draw_card(draw, (18, top + 142 + gap, left_w, 124), 'SYSTEM', self._system_lines(mode), accent)
-            self._draw_card(draw, (18 + left_w + gap, top + 142 + gap, right_w, 124), 'NEXT STEP', [('1', 'Leave this screen on HDMI' if mode != 'offline' else 'Start youtube-companion.service', (245, 245, 245)), ('2', 'It will switch modes automatically', (214, 214, 214)), ('3', 'Warnings and auth prompts show here', accent)], accent)
+                top = 110 if not self.auth.get('pending') else 170
+                gap = 14
+                left_w = 386
+                right_w = self.width - left_w - gap - 36
+                self._draw_card(draw, (18, top, left_w, 142), 'SUMMARY', self._summary_lines(mode), accent)
+                self._draw_card(draw, (18 + left_w + gap, top, right_w, 142), 'AUDIENCE', self._audience_lines(mode), accent)
+                self._draw_card(draw, (18, top + 142 + gap, left_w, 124), 'SYSTEM', self._system_lines(mode), accent)
+                self._draw_card(draw, (18 + left_w + gap, top + 142 + gap, right_w, 124), 'NEXT STEP', [('1', 'Leave this screen on HDMI' if mode != 'offline' else 'Start youtube-companion.service', (245, 245, 245)), ('2', 'It will switch modes automatically', (214, 214, 214)), ('3', 'Warnings and auth prompts show here', accent)], accent)
 
-            footer = _clip(self._footer_text(mode), 96)
-            draw.rounded_rectangle((18, self.height - 58, self.width - 18, self.height - 16), radius=14, fill=(10, 14, 18), outline=accent, width=2)
-            draw.text((30, self.height - 48), footer, font=self.font_text, fill=(232, 236, 240))
+                footer = _clip(self._footer_text(mode), 96)
+                draw.rounded_rectangle((18, self.height - 58, self.width - 18, self.height - 16), radius=14, fill=(10, 14, 18), outline=accent, width=2)
+                draw.text((30, self.height - 48), footer, font=self.font_text, fill=(232, 236, 240))
 
             self._write_frame(image)
             elapsed = time.time() - started
@@ -839,6 +988,14 @@ def _parse_resolution(value):
         raise argparse.ArgumentTypeError('resolution must look like 1280x720') from exc
 
 
+def _install_signal_handlers():
+    def _handle_stop(_signum, _frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_stop)
+    signal.signal(signal.SIGINT, _handle_stop)
+
+
 def main():
     parser = argparse.ArgumentParser(description='YouTube Companion HDMI screen')
     parser.add_argument('--status-url', default='http://127.0.0.1:8091/status')
@@ -847,10 +1004,12 @@ def main():
     parser.add_argument('--poll-seconds', type=float, default=5.0)
     parser.add_argument('--http-timeout', type=float, default=3.0)
     parser.add_argument('--fps', type=int, default=30)
+    parser.add_argument('--idle-seconds', type=float, default=300.0, help='seconds in READY before switching to idle matrix mode')
     parser.add_argument('--windowed', action='store_true', help='use a resizable window instead of fullscreen')
     parser.add_argument('--resolution', default='', help='window size for --windowed, for example 1280x720')
     args = parser.parse_args()
 
+    _install_signal_handlers()
     args.width, args.height = _parse_resolution(args.resolution)
     try:
         app = CompanionScreen(args)

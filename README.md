@@ -36,6 +36,14 @@ Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
 ![YouTube Companion CYD Warning View](IMG_20260414_231044655_HDR.jpg)
 *The companion CYD while live — showing the current broadcast, active stream state, and a YouTube-side ingest warning surfaced directly on the dashboard.*
 
+### YouTube Companion HDMI Status Screen
+![YouTube Companion HDMI Status Screen](IMG_20260416_005819072.jpg)
+*The Pi Zero HDMI display showing the companion dashboard directly on a larger screen — ready state, audience/status cards, and the always-on YouTube-side monitor without the CYD attached.*
+
+### YouTube Companion HDMI Idle Matrix Mode
+![YouTube Companion HDMI Idle Matrix Mode](IMG_20260416_010956502_HDR.jpg)
+*After sitting in READY for a while, the HDMI display can switch to a dark matrix-style idle screen with a small clock, then snap back to the full dashboard when YouTube state changes.*
+
 ---
 
 ## Hardware
@@ -200,7 +208,7 @@ What it does:
 
 - Polls the local companion service at `127.0.0.1:8091`
 - Shows **OFFLINE**, **AUTH**, **READY**, **LIVE**, and **WARNING** states
-- Uses a lightweight animated micro-dots background so the screen does not look static while idle
+- Keeps the normal status dashboard during active use, then after about 5 minutes in **READY** switches to a dark matrix-style idle screen with a small clock
 - Surfaces YouTube health issues, views, average view duration, and concurrent viewers in large cards
 - Tries SDL fullscreen first, then falls back to direct `/dev/fb0` rendering on Raspberry Pi OS Lite if SDL cannot open HDMI cleanly
 - Switches automatically between standby/auth/live states without touching the CYD code
