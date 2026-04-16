@@ -1,0 +1,29 @@
+[Unit]
+Description=YouTube Companion HDMI status screen
+After=network-online.target youtube-companion.service
+Wants=network-online.target youtube-companion.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+User=coreymillia
+WorkingDirectory=/home/coreymillia/youtube-companion
+RuntimeDirectory=youtube-companion-screen
+Environment=SDL_AUDIODRIVER=dummy
+Environment=TERM=linux
+Environment=PYGAME_HIDE_SUPPORT_PROMPT=1
+Environment=XDG_RUNTIME_DIR=/run/youtube-companion-screen
+ExecStartPre=/bin/sh -c '/usr/bin/chvt 1 && /usr/bin/setterm -cursor off > /dev/tty1'
+ExecStart=/usr/bin/python3 /home/coreymillia/youtube-companion/youtube_companion_screen.py
+ExecStopPost=/bin/sh -c '/usr/bin/setterm -cursor on > /dev/tty1 || true'
+Restart=on-failure
+RestartSec=5
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVTDisallocate=yes
+StandardOutput=tty
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

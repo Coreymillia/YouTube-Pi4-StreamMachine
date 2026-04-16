@@ -69,6 +69,7 @@ Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
 - **Auto-reconnect** — keeps retrying on connection loss instead of stopping after a fixed retry limit
 - **CYD companion display** — touch dashboard for stream state, Ethernet health, system temperature, and quick controls
 - **CYD snapshot mode** — lightweight still-image camera alignment view with manual refresh and timed auto-refresh
+- **Optional HDMI companion screen** — fullscreen Pi-side standby/live display with animated background, auth prompts, and YouTube health cards
 - **YouTube Live Chat Bot** *(optional / not yet validated on this bench)* — included for headless messages, random timed messages, and keyword-triggered replies
 - **Stream key saved locally** — stored in `config.json`, never transmitted anywhere else
 - **Auto-starts on boot** via systemd
@@ -150,10 +151,12 @@ The companion is intended to run separately from the encoder Pi so the main Pi s
 | Path | Purpose |
 |---|---|
 | `YouTubeCompanion/youtube_companion.py` | Device-auth + YouTube polling service |
+| `YouTubeCompanion/youtube_companion_screen.py` | Fullscreen HDMI status/screensaver app for the companion Pi |
 | `YouTubeCompanion/config.example.json` | Example config for client ID/secret and listen port |
 | `YouTubeCompCYD/` | Dedicated CYD firmware for the companion Pi's `/status` + `/auth_status` APIs |
 | `INVERTYouTubeCompCYD/` | Inverted/touch-calibrated companion CYD firmware variant |
 | `systemd/youtube-companion.service` | Example systemd unit for the Pi Zero |
+| `systemd/youtube-companion-screen.service` | Optional systemd unit for the Pi Zero HDMI display |
 
 ### What it exposes
 
@@ -167,11 +170,14 @@ The companion is intended to run separately from the encoder Pi so the main Pi s
 
 ```bash
 sudo apt update
+sudo apt install -y python3-pygame python3-pil
 git clone https://github.com/Coreymillia/YouTube-Pi4-StreamMachine.git /home/coreymillia/youtube-companion-src
 mkdir -p /home/coreymillia/youtube-companion
 cp /home/coreymillia/youtube-companion-src/YouTubeCompanion/youtube_companion.py /home/coreymillia/youtube-companion/
+cp /home/coreymillia/youtube-companion-src/YouTubeCompanion/youtube_companion_screen.py /home/coreymillia/youtube-companion/
 cp /home/coreymillia/youtube-companion-src/YouTubeCompanion/config.example.json /home/coreymillia/youtube-companion/config.json
 sudo cp /home/coreymillia/youtube-companion-src/systemd/youtube-companion.service /etc/systemd/system/
+sudo cp /home/coreymillia/youtube-companion-src/systemd/youtube-companion-screen.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now youtube-companion.service
 ```
@@ -185,6 +191,41 @@ http://<pi-zero-ip>:8091
 Paste the OAuth client ID and secret, save them, and start device auth.
 
 > The companion uses **YouTube readonly scope** only. It is meant for **status/health polling**, not for controlling YouTube Studio or posting chat messages.
+
+### Companion HDMI screen
+
+If the CYD is disconnected when you are not live, the Pi Zero can drive an **HDMI status screen** directly. The HDMI app is separate from the CYD firmware and is meant to stay fullscreen on the Pi's local display.
+
+What it does:
+
+- Polls the local companion service at `127.0.0.1:8091`
+- Shows **OFFLINE**, **AUTH**, **READY**, **LIVE**, and **WARNING** states
+- Uses a lightweight animated micro-dots background so the screen does not look static while idle
+- Surfaces YouTube health issues, views, average view duration, and concurrent viewers in large cards
+- Tries SDL fullscreen first, then falls back to direct `/dev/fb0` rendering on Raspberry Pi OS Lite if SDL cannot open HDMI cleanly
+- Switches automatically between standby/auth/live states without touching the CYD code
+
+To enable it on the companion Pi:
+
+```bash
+cp /home/coreymillia/youtube-companion-src/YouTubeCompanion/youtube_companion_screen.py /home/coreymillia/youtube-companion/
+sudo cp /home/coreymillia/youtube-companion-src/systemd/youtube-companion-screen.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now youtube-companion-screen.service
+```
+
+If you want to test it from SSH before enabling the service:
+
+```bash
+python3 /home/coreymillia/youtube-companion/youtube_companion_screen.py --windowed --resolution 1280x720
+```
+
+If you later want to stop the HDMI screen and return tty1 to the normal login prompt:
+
+```bash
+sudo systemctl disable --now youtube-companion-screen.service
+sudo systemctl restart getty@tty1.service
+```
 
 ### Google Auth Platform setup for the companion
 
