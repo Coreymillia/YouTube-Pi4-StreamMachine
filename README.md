@@ -44,22 +44,46 @@ Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
 ![YouTube Companion HDMI Idle Matrix Mode](IMG_20260416_010956502_HDR.jpg)
 *After sitting in READY for a while, the HDMI display can switch to a dark matrix-style idle screen with a small clock, then snap back to the full dashboard when YouTube state changes.*
 
+### YouTube Companion LCD HAT Status Mode
+![YouTube Companion LCD HAT Status Mode](IMG_20260417_131211056_HDR.jpg)
+*The Pi Zero companion with a Waveshare 1.44-inch LCD HAT attached — showing the compact local status mode that can stay mounted full-time for quick checks, snapshots, and stream start/stop control without touching the web UI.*
+
 ---
 
 ## Hardware
 
-**Required for the main streamer**
+### Minimum hardware for the main streamer
 
 - **Raspberry Pi 4 Model B**
-- **Raspberry Pi HQ Camera (IMX477)** — connected via CSI ribbon to the CAM/DISP 0 port (closest to USB-C power)
-- **C-mount lens support** — the HQ Camera can use any compatible C-mount lens, so the build is not limited to the engraving lens shown in the photos
+- **microSD card** with Raspberry Pi OS Lite 64-bit (Bookworm)
+- **Stable 5V power supply** for the Pi 4
+- **Wired or reliable Wi-Fi network connection** for YouTube RTMP upload
+- **Raspberry Pi HQ Camera (IMX477)** connected via CSI ribbon to the CAM/DISP 0 port
+- **Compatible C-mount lens** for the HQ camera
 
-**Optional add-ons**
+### Optional hardware for the main streamer
 
-- **USB Microscope Camera** — plug-and-play alternate camera source (H264 capable recommended)
-- **Raspberry Pi Zero 2 W** — optional companion Pi for YouTube-side broadcast/health polling
-- **1 to 2 Cheap Yellow Displays (CYD / ESP32-2432S028)** — optional touch dashboards for the main Pi, the companion Pi, or both
-- Bluetooth keyboard for SSH/terminal access without a screen
+- **USB microscope camera** — alternate camera source (H264-capable preferred)
+- **HDMI monitor / small display** for local setup or diagnostics
+- **USB keyboard / mouse** or a Bluetooth keyboard for direct local access
+- **Ethernet connection** if you want the most stable RTMP uplink and accurate LAN traffic reporting
+
+### Optional companion hardware
+
+- **Raspberry Pi Zero 2 W** — separate companion Pi for YouTube-side polling and remote display duties
+- **microSD card** for the companion Pi
+- **Stable 5V power supply** for the companion Pi
+- **7-inch HDMI screen** (or similar HDMI display) for the fullscreen companion dashboard
+- **Waveshare 1.44" LCD HAT** for the compact joystick-driven companion controller
+- **1 to 2 Cheap Yellow Displays (CYD / ESP32-2432S028)** for touch dashboards on the main Pi, the companion Pi, or both
+
+### What this repo supports in practice
+
+- **Main Pi only** — browser UI + camera + RTMP streaming
+- **Main Pi + CYD** — local touchscreen status/control without opening a browser
+- **Main Pi + Pi Zero companion + HDMI screen** — always-on YouTube-side + streamer-side dashboard
+- **Main Pi + Pi Zero companion + LCD HAT** — compact local control/status display on the companion
+- **Main Pi + Pi Zero companion + CYD + HDMI + HAT** — mix-and-match displays depending on how much hardware you want connected
 
 ---
 
@@ -141,6 +165,64 @@ http://<pi-ip>:8090
 | `/snapshot` | Single JPEG frame from the current preview camera |
 | `/status` | JSON status (running, uptime, cams, quality) |
 | `/bot_status` | JSON chat bot status |
+
+---
+
+## Companion LCD HAT controller
+
+If you want a small on-device control screen on the **Pi Zero companion**, this repo now includes a **Waveshare 1.44" LCD HAT** client:
+
+- `youtube_hat_ui.py`
+- `systemd/youtube-hat-ui.service`
+
+It runs as a **separate UI service** on the companion Pi and talks to the main Pi's existing streamer API instead of modifying the streamer daemon directly.
+
+### Current modes
+
+1. **Status** — shows live/idle state, active camera, uptime, LAN tx/rx, temp, and whether the on-stream message overlay is enabled
+2. **Snapshot** — shows the current `/snapshot` image scaled onto the 128x128 LCD when the preview is available
+3. **Control** — lets you start or stop the stream from the HAT; while idle, joystick up/down picks the camera and joystick press confirms the action
+
+### Controls
+
+| Control | Action |
+|---|---|
+| `KEY1` | Jump to **Status** |
+| `KEY2` | Jump to **Snapshot** |
+| `KEY3` | Jump to **Control** |
+| `JOY ← / →` | Cycle modes |
+| `JOY ↑ / ↓` | Change selected camera in **Control** mode while idle |
+| `JOY ●` | Refresh or confirm the current mode action |
+
+### Notes
+
+- The HAT UI reuses the main Pi's streamer endpoints: `/status`, `/snapshot`, `/start`, and `/stop`
+- By default it reads `streamer_status_host` and `streamer_status_port` from the companion `config.json`, the same way the HDMI companion screen does
+- Snapshot mode follows the existing streamer behavior, so preview snapshots are **disabled while live**
+- The start/stop action is intentionally **double-press to confirm** so you do not stop a stream by bumping the joystick
+- If your HAT is mounted upside down, you can invert the vertical joystick behavior with `--invert-vertical`
+- If the whole HAT is mounted upside down, you can rotate the display with `--rotate-180`
+
+### Setup on the companion Pi
+
+Install the Waveshare LCD HAT Python support so `LCD_1in44.py`, `LCD_Config.py`, and `RPi.GPIO` are available on the Pi Zero, then:
+
+```bash
+sudo apt update
+sudo apt install -y python3-pil
+cp /home/coreymillia/youtube-companion-src/youtube_hat_ui.py /home/coreymillia/youtube-companion/
+sudo cp /home/coreymillia/youtube-companion-src/systemd/youtube-hat-ui.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now youtube-hat-ui.service
+```
+
+This repo intentionally keeps the vendor Waveshare driver files out of version control, so copy the matching `LCD_1in44.py` and `LCD_Config.py` from your working Waveshare package or example project into `/home/coreymillia/youtube-companion/` before starting the service.
+
+To stop it later:
+
+```bash
+sudo systemctl disable --now youtube-hat-ui.service
+```
 
 ---
 

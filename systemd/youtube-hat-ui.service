@@ -1,0 +1,17 @@
+[Unit]
+Description=YouTube Studio Waveshare LCD HAT controller
+After=network.target youtube-studio.service
+Wants=youtube-studio.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/coreymillia/youtube-companion/youtube_hat_ui.py --invert-vertical --rotate-180
+WorkingDirectory=/home/coreymillia/youtube-companion
+User=root
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
