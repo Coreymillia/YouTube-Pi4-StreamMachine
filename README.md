@@ -37,8 +37,8 @@ Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
 *The companion CYD while live — showing the current broadcast, active stream state, and a YouTube-side ingest warning surfaced directly on the dashboard.*
 
 ### YouTube Companion HDMI Status Screen
-![YouTube Companion HDMI Status Screen](IMG_20260416_005819072.jpg)
-*The Pi Zero HDMI display showing the companion dashboard directly on a larger screen — ready state, audience/status cards, and the always-on YouTube-side monitor without the CYD attached.*
+![YouTube Companion HDMI Status Screen](IMG_20260416_185246804_HDR.jpg)
+*The Pi Zero HDMI display after the dashboard merge — local Pi 4 streamer status on the left, YouTube companion status on the right, and the full CYD-style day-to-day monitor now fitting the 7-inch screen.*
 
 ### YouTube Companion HDMI Idle Matrix Mode
 ![YouTube Companion HDMI Idle Matrix Mode](IMG_20260416_010956502_HDR.jpg)
@@ -208,6 +208,7 @@ What it does:
 
 - Polls the local companion service at `127.0.0.1:8091`
 - Shows **OFFLINE**, **AUTH**, **READY**, **LIVE**, and **WARNING** states
+- Can also poll the main Pi 4 streamer `/status` endpoint so the HDMI screen replaces the day-to-day CYD dashboard with the same local fields: cam/audio, uptime/retries, ETH/RTMP, LAN traffic, and system/message data
 - Keeps the normal status dashboard during active use, then after about 5 minutes in **READY** switches to a dark matrix-style idle screen with a small clock
 - Surfaces YouTube health issues, views, average view duration, and concurrent viewers in large cards
 - Tries SDL fullscreen first, then falls back to direct `/dev/fb0` rendering on Raspberry Pi OS Lite if SDL cannot open HDMI cleanly
@@ -227,6 +228,8 @@ If you want to test it from SSH before enabling the service:
 ```bash
 python3 /home/coreymillia/youtube-companion/youtube_companion_screen.py --windowed --resolution 1280x720
 ```
+
+Set the **Streamer Pi address / hostname** in the companion web UI to the main streamer Pi (port `8090`) so the HDMI display can merge local Pi 4 stats with the YouTube-side companion data.
 
 If you later want to stop the HDMI screen and return tty1 to the normal login prompt:
 

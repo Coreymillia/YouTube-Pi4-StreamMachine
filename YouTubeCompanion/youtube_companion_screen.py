@@ -23,6 +23,9 @@ from datetime import datetime
 
 os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_CONFIG_PATH = os.path.join(_PROJECT_DIR, 'config.json')
+
 try:
     import pygame
 except ImportError as exc:
@@ -47,6 +50,119 @@ def _fetch_json(url, timeout):
     req = urllib.request.Request(url, headers={'Cache-Control': 'no-cache'})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def _load_screen_cfg():
+    cfg = {
+        'streamer_status_host': '192.168.0.123',
+        'streamer_status_port': 8090,
+    }
+    try:
+        with open(_CONFIG_PATH) as f:
+            cfg.update(json.load(f))
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError:
+        pass
+    cfg['streamer_status_host'] = str(cfg.get('streamer_status_host', '192.168.0.123')).strip()
+    try:
+        cfg['streamer_status_port'] = max(1, int(cfg.get('streamer_status_port', 8090)))
+    except (TypeError, ValueError):
+        cfg['streamer_status_port'] = 8090
+    return cfg
+
+
+def _streamer_url(args):
+    if args.streamer_status_url:
+        return args.streamer_status_url
+    cfg = _load_screen_cfg()
+    host = cfg.get('streamer_status_host', '')
+    if not host:
+        return ''
+    return f"http://{host}:{cfg['streamer_status_port']}/status"
+
+
+def _blank_streamer_state():
+    return {
+        'online': False,
+        'running': False,
+        'uptime_s': 0,
+        'retries': 0,
+        'cam_name': '',
+        'preview_cam': '',
+        'audio_name': '',
+        'audio_silent': False,
+        'error': '',
+        'rtmp_state': '',
+        'eth_carrier': False,
+        'eth_oper': '',
+        'tx_bytes': 0,
+        'rx_bytes': 0,
+        'tx_kbps': 0,
+        'rx_kbps': 0,
+        'temp_c': None,
+        'throttled': '',
+        'msg_enabled': False,
+        'msg_text': '',
+    }
+
+
+def _parse_streamer_state(raw, previous, now):
+    state = _blank_streamer_state()
+    if not isinstance(raw, dict):
+        return state, previous
+
+    state['online'] = True
+    state['running'] = bool(raw.get('running'))
+    state['uptime_s'] = _safe_int(raw.get('uptime_s'))
+    state['retries'] = _safe_int(raw.get('retries'))
+    state['cam_name'] = str(raw.get('cam_name') or '')
+    state['preview_cam'] = str(raw.get('preview_cam') or '')
+    state['audio_name'] = str(raw.get('audio_name') or '')
+    state['audio_silent'] = bool(raw.get('audio_silent'))
+    state['error'] = str(raw.get('error') or '')
+    state['rtmp_state'] = str(raw.get('rtmp_state') or '')
+
+    eth = raw.get('eth0') or {}
+    state['eth_carrier'] = bool(eth.get('carrier'))
+    state['eth_oper'] = str(eth.get('operstate') or '')
+    state['tx_bytes'] = _safe_int(eth.get('tx_bytes'))
+    state['rx_bytes'] = _safe_int(eth.get('rx_bytes'))
+
+    sys = raw.get('system') or {}
+    try:
+        state['temp_c'] = float(sys.get('temp_c')) if sys.get('temp_c') is not None else None
+    except (TypeError, ValueError):
+        state['temp_c'] = None
+    state['throttled'] = str(sys.get('throttled') or '')
+
+    msg = raw.get('stream_message') or {}
+    state['msg_enabled'] = bool(msg.get('enabled'))
+    state['msg_text'] = str(msg.get('text') or '')
+
+    prev_tx, prev_rx, prev_time = previous
+    if prev_time and now > prev_time:
+        dt_ms = max(1.0, (now - prev_time) * 1000.0)
+        tx_delta = max(0, state['tx_bytes'] - prev_tx)
+        rx_delta = max(0, state['rx_bytes'] - prev_rx)
+        state['tx_kbps'] = int((tx_delta * 8.0) / dt_ms)
+        state['rx_kbps'] = int((rx_delta * 8.0) / dt_ms)
+    return state, (state['tx_bytes'], state['rx_bytes'], now)
+
+
+def _active_cam_label(streamer):
+    if streamer.get('cam_name'):
+        return streamer['cam_name']
+    if streamer.get('preview_cam'):
+        return streamer['preview_cam']
+    return 'No camera'
+
+
+def _fmt_uptime(seconds):
+    total = max(0, int(seconds or 0))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f'{hours:02d}:{minutes:02d}:{secs:02d}'
 
 
 def _display_drivers(windowed):
@@ -126,8 +242,10 @@ def _derive_mode(status, auth, fetch_error):
     return 'ready'
 
 
-def _resolve_display_mode(base_mode, idle_since, now, idle_seconds):
+def _resolve_display_mode(base_mode, idle_since, now, idle_seconds, streamer_running):
     if base_mode == 'ready':
+        if streamer_running:
+            return 'ready', None
         if idle_since is None:
             idle_since = now
         if now - idle_since >= idle_seconds:
@@ -287,6 +405,9 @@ class CompanionScreen:
         self.last_refresh = 0.0
         self.last_ok = 0.0
         self.idle_since = None
+        self.streamer = _blank_streamer_state()
+        self.streamer_status_url = _streamer_url(args)
+        self._streamer_prev_sample = (0, 0, 0.0)
 
         self.dots = DotField(self.width, self.height, max(120, (self.width * self.height) // 18000))
         self.matrix = MatrixRain(self.width, self.height)
@@ -323,11 +444,11 @@ class CompanionScreen:
 
     def _build_fonts(self):
         short_edge = min(self.width, self.height)
-        self.font_title = pygame.font.SysFont('dejavusansmono', max(24, short_edge // 22), bold=True)
-        self.font_mode = pygame.font.SysFont('dejavusansmono', max(38, short_edge // 13), bold=True)
-        self.font_section = pygame.font.SysFont('dejavusansmono', max(18, short_edge // 34), bold=True)
-        self.font_text = pygame.font.SysFont('dejavusansmono', max(16, short_edge // 42))
-        self.font_small = pygame.font.SysFont('dejavusansmono', max(14, short_edge // 54))
+        self.font_title = pygame.font.SysFont('dejavusansmono', max(18, short_edge // 26), bold=True)
+        self.font_mode = pygame.font.SysFont('dejavusansmono', max(28, short_edge // 17), bold=True)
+        self.font_section = pygame.font.SysFont('dejavusansmono', max(15, short_edge // 38), bold=True)
+        self.font_text = pygame.font.SysFont('dejavusansmono', max(13, short_edge // 48))
+        self.font_small = pygame.font.SysFont('dejavusansmono', max(11, short_edge // 64))
         self.font_matrix = pygame.font.SysFont('dejavusansmono', max(14, short_edge // 30), bold=True)
         self.font_code = pygame.font.SysFont('dejavusansmono', max(34, short_edge // 11), bold=True)
 
@@ -336,6 +457,7 @@ class CompanionScreen:
         if now - self.last_refresh < self.args.poll_seconds:
             return
         self.last_refresh = now
+        self.streamer_status_url = _streamer_url(self.args)
         try:
             self.status = _fetch_json(self.args.status_url, self.args.http_timeout)
             self.auth = _fetch_json(self.args.auth_url, self.args.http_timeout)
@@ -343,6 +465,14 @@ class CompanionScreen:
             self.last_ok = now
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             self.fetch_error = str(exc)
+        if self.streamer_status_url:
+            try:
+                raw = _fetch_json(self.streamer_status_url, self.args.http_timeout)
+                self.streamer, self._streamer_prev_sample = _parse_streamer_state(raw, self._streamer_prev_sample, now)
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError):
+                self.streamer = _blank_streamer_state()
+        else:
+            self.streamer = _blank_streamer_state()
 
     def _accent(self, mode):
         pulse = 0.65 + 0.35 * math.sin(time.time() * 4.0)
@@ -395,16 +525,16 @@ class CompanionScreen:
         self.screen.blit(panel, (x, y))
 
         title_h = self.font_section.render(title, True, title_color)
-        self.screen.blit(title_h, (x + 18, y + 14))
-        line_y = y + 18 + title_h.get_height() + 10
+        self.screen.blit(title_h, (x + 12, y + 10))
+        line_y = y + 14 + title_h.get_height() + 6
         for label, value, color in lines:
             label_text = f'{label}: ' if label else ''
             line = label_text + value
-            wrapped = self._wrap_lines(line, w - 36, self.font_text) or ['']
-            for item in wrapped[:4]:
-                line_y += self._draw_text(item, self.font_text, color, x + 18, line_y)
-                line_y += 6
-                if line_y >= y + h - 24:
+            wrapped = self._wrap_lines(line, w - 24, self.font_text) or ['']
+            for item in wrapped[:3]:
+                line_y += self._draw_text(item, self.font_text, color, x + 12, line_y)
+                line_y += 3
+                if line_y >= y + h - 14:
                     return
 
     def _summary_lines(self, mode):
@@ -445,6 +575,47 @@ class CompanionScreen:
             lines.append(('ISSUE', _clip(first.get('description') or first.get('reason') or first.get('type') or 'Warning reported', 86), (255, 196, 160)))
         return lines
 
+    def _streamer_overview_lines(self, mode):
+        accent = self._accent(mode)
+        if not self.streamer['online']:
+            return [
+                ('STREAMER', 'Pi 4 status offline', (245, 245, 245)),
+                ('TARGET', self.streamer_status_url or 'Not configured', accent),
+            ]
+        state = 'LIVE' if self.streamer['running'] else 'IDLE'
+        if self.streamer['running'] and self.streamer['retries'] > 0:
+            state = 'RECOVER'
+        audio = self.streamer['audio_name'] or 'No audio'
+        if self.streamer['audio_silent']:
+            audio = 'No Audio'
+        return [
+            ('STATE', state, accent),
+            ('CAM', _active_cam_label(self.streamer), (245, 245, 245)),
+            ('AUDIO', audio, (214, 214, 214)),
+        ]
+
+    def _streamer_network_lines(self, mode):
+        accent = self._accent(mode)
+        if not self.streamer['online']:
+            return [('INFO', 'Waiting for streamer status', accent)]
+        eth = 'up ' + (self.streamer['eth_oper'] or '-') if self.streamer['eth_carrier'] else 'down ' + (self.streamer['eth_oper'] or '-')
+        return [
+            ('UP / RET', f"{_fmt_uptime(self.streamer['uptime_s'])}   r:{self.streamer['retries']}", (245, 245, 245)),
+            ('ETH / RTMP', f"{eth.strip()}   {self.streamer['rtmp_state'] or '-'}", (214, 214, 214)),
+            ('LAN', f"tx:{self.streamer['tx_kbps']}   rx:{self.streamer['rx_kbps']} kbps", accent),
+        ]
+
+    def _streamer_system_lines(self, mode):
+        accent = self._accent(mode)
+        if not self.streamer['online']:
+            return [('INFO', 'No local Pi 4 system data yet', accent)]
+        temp = f"{self.streamer['temp_c']:.1f} C" if self.streamer['temp_c'] is not None else '-'
+        message = self.streamer['msg_text'] if self.streamer['msg_enabled'] and self.streamer['msg_text'] else 'off'
+        return [
+            ('TEMP / THR', f"{temp}   {self.streamer['throttled'] or '-'}", (245, 245, 245)),
+            ('MSG', _clip(message, 52), accent if self.streamer['msg_enabled'] else (214, 214, 214)),
+        ]
+
     def _audience_lines(self, mode):
         audience = self.status.get('audience') or {}
         views = audience.get('views')
@@ -481,13 +652,17 @@ class CompanionScreen:
     def _draw_header(self, mode):
         accent = self._accent(mode)
         now_text = datetime.now().strftime('%H:%M:%S')
-        self._draw_text('YouTube Companion HDMI', self.font_title, (232, 244, 255), 28, 22)
         badge = self.font_mode.render(self._mode_label(mode), True, accent)
         badge_rect = badge.get_rect()
-        badge_rect.topright = (self.width - 26, 18)
+        badge_rect.topleft = (18, 10)
         self.screen.blit(badge, badge_rect)
-        self._draw_text(now_text, self.font_small, (180, 198, 214), self.width - 26 - self.font_small.size(now_text)[0], badge_rect.bottom + 2)
-        self._draw_text(self.args.web_url, self.font_small, (148, 165, 180), 30, 64)
+        self._draw_text(now_text, self.font_title, (232, 244, 255), self.width - 18 - self.font_title.size(now_text)[0], 12)
+        if self.streamer['online']:
+            state = 'LIVE' if self.streamer['running'] else 'IDLE'
+            if self.streamer['running'] and self.streamer['retries'] > 0:
+                state = 'RECOVER'
+            label = f'PI4 {state}'
+            self._draw_text(label, self.font_small, (148, 165, 180), self.width - 18 - self.font_small.size(label)[0], 36)
 
     def _draw_auth_code(self):
         if not self.auth.get('pending'):
@@ -514,15 +689,19 @@ class CompanionScreen:
             line = first.get('description') or first.get('reason') or first.get('type') or ''
         elif audience.get('note'):
             line = audience['note']
+        elif self.streamer.get('error'):
+            line = self.streamer['error']
+        elif self.streamer.get('msg_enabled') and self.streamer.get('msg_text'):
+            line = self.streamer['msg_text']
         else:
             line = 'Animated standby view stays active while the Pi polls YouTube.'
 
-        footer_rect = pygame.Rect(24, self.height - 72, self.width - 48, 44)
+        footer_rect = pygame.Rect(18, self.height - 46, self.width - 36, 28)
         panel = pygame.Surface((footer_rect.width, footer_rect.height), pygame.SRCALPHA)
         panel.fill((10, 14, 18, 205))
-        pygame.draw.rect(panel, (*self._accent(mode), 210), panel.get_rect(), width=2, border_radius=16)
+        pygame.draw.rect(panel, (*self._accent(mode), 210), panel.get_rect(), width=1, border_radius=12)
         self.screen.blit(panel, footer_rect.topleft)
-        self._draw_text(_clip(line, 120), self.font_text, (232, 236, 240), footer_rect.x + 16, footer_rect.y + 10)
+        self._draw_text(_clip(line, 110), self.font_small, (232, 236, 240), footer_rect.x + 10, footer_rect.y + 6)
 
     def _draw_idle_screen(self):
         now_text = datetime.now().strftime('%H:%M')
@@ -550,48 +729,51 @@ class CompanionScreen:
 
     def _draw_layout(self, mode):
         accent = self._accent(mode)
-        top = int(self.height * 0.18)
-        card_gap = 18
-        left_w = int(self.width * 0.5) - 34
-        right_w = self.width - left_w - card_gap - 52
-        left_x = 24
+        top = 54 if not self.auth.get('pending') else 118
+        card_gap = 12
+        left_w = 376
+        right_w = self.width - left_w - card_gap - 36
+        left_x = 18
         right_x = left_x + left_w + card_gap
 
-        summary_h = int(self.height * 0.25)
-        lower_h = int(self.height * 0.22)
-        sys_h = int(self.height * 0.18)
+        summary_h = 92
+        lower_h = 92
+        sys_h = 64
 
         self._draw_card(
             (left_x, top, left_w, summary_h),
-            'SUMMARY',
-            self._summary_lines(mode),
+            'STREAMER',
+            self._streamer_overview_lines(mode),
             accent,
         )
         self._draw_card(
             (right_x, top, right_w, summary_h),
+            'YOUTUBE',
+            self._summary_lines(mode),
+            accent,
+        )
+        self._draw_card(
+            (left_x, top + summary_h + card_gap, left_w, lower_h),
+            'NETWORK',
+            self._streamer_network_lines(mode),
+            accent,
+        )
+        self._draw_card(
+            (right_x, top + summary_h + card_gap, right_w, lower_h),
             'AUDIENCE',
             self._audience_lines(mode),
             accent,
         )
         self._draw_card(
-            (left_x, top + summary_h + card_gap, left_w, lower_h),
+            (left_x, top + summary_h + lower_h + card_gap * 2, left_w, sys_h),
             'SYSTEM',
+            self._streamer_system_lines(mode),
+            accent,
+        )
+        self._draw_card(
+            (right_x, top + summary_h + lower_h + card_gap * 2, right_w, sys_h),
+            'STATUS',
             self._system_lines(mode),
-            accent,
-        )
-        self._draw_card(
-            (right_x, top + summary_h + card_gap, right_w, lower_h),
-            'NEXT STEP',
-            self._next_step_lines(mode),
-            accent,
-        )
-        self._draw_card(
-            (left_x, top + summary_h + lower_h + card_gap * 2, self.width - 48, sys_h),
-            'STATUS URLS',
-            [
-                ('STATUS', self.args.status_url, (245, 245, 245)),
-                ('AUTH', self.args.auth_url, (214, 214, 214)),
-            ],
             accent,
         )
 
@@ -654,6 +836,7 @@ class CompanionScreen:
                 self.idle_since,
                 time.time(),
                 self.args.idle_seconds,
+                self.streamer['running'],
             )
 
             if mode == 'idle':
@@ -695,6 +878,9 @@ class FramebufferScreen:
         self.last_refresh = 0.0
         self.last_ok = 0.0
         self.idle_since = None
+        self.streamer = _blank_streamer_state()
+        self.streamer_status_url = _streamer_url(args)
+        self._streamer_prev_sample = (0, 0, 0.0)
         self.dots = DotField(self.width, self.height, max(90, (self.width * self.height) // 22000))
         self.matrix = MatrixRain(self.width, self.height)
         self._build_fonts()
@@ -720,11 +906,11 @@ class FramebufferScreen:
 
     def _build_fonts(self):
         short_edge = min(self.width, self.height)
-        self.font_title = self._font(max(20, short_edge // 22))
-        self.font_mode = self._font(max(34, short_edge // 12))
-        self.font_section = self._font(max(18, short_edge // 32))
-        self.font_text = self._font(max(15, short_edge // 40))
-        self.font_small = self._font(max(13, short_edge // 52))
+        self.font_title = self._font(max(18, short_edge // 26))
+        self.font_mode = self._font(max(28, short_edge // 17))
+        self.font_section = self._font(max(15, short_edge // 38))
+        self.font_text = self._font(max(13, short_edge // 48))
+        self.font_small = self._font(max(11, short_edge // 64))
         self.font_matrix = self._font(max(14, short_edge // 30))
         self.font_code = self._font(max(30, short_edge // 10))
 
@@ -733,6 +919,7 @@ class FramebufferScreen:
         if now - self.last_refresh < self.args.poll_seconds:
             return
         self.last_refresh = now
+        self.streamer_status_url = _streamer_url(self.args)
         try:
             self.status = _fetch_json(self.args.status_url, self.args.http_timeout)
             self.auth = _fetch_json(self.args.auth_url, self.args.http_timeout)
@@ -740,6 +927,14 @@ class FramebufferScreen:
             self.last_ok = now
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             self.fetch_error = str(exc)
+        if self.streamer_status_url:
+            try:
+                raw = _fetch_json(self.streamer_status_url, self.args.http_timeout)
+                self.streamer, self._streamer_prev_sample = _parse_streamer_state(raw, self._streamer_prev_sample, now)
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError):
+                self.streamer = _blank_streamer_state()
+        else:
+            self.streamer = _blank_streamer_state()
 
     def _accent(self, mode):
         pulse = 0.65 + 0.35 * math.sin(time.time() * 4.0)
@@ -818,6 +1013,47 @@ class FramebufferScreen:
             lines.append(('ISSUE', _clip(first.get('description') or first.get('reason') or first.get('type') or 'Warning reported', 74), (255, 196, 160)))
         return lines
 
+    def _streamer_overview_lines(self, mode):
+        accent = self._accent(mode)
+        if not self.streamer['online']:
+            return [
+                ('STREAMER', 'Pi 4 status offline', (245, 245, 245)),
+                ('TARGET', self.streamer_status_url or 'Not configured', accent),
+            ]
+        state = 'LIVE' if self.streamer['running'] else 'IDLE'
+        if self.streamer['running'] and self.streamer['retries'] > 0:
+            state = 'RECOVER'
+        audio = self.streamer['audio_name'] or 'No audio'
+        if self.streamer['audio_silent']:
+            audio = 'No Audio'
+        return [
+            ('STATE', state, accent),
+            ('CAM', _active_cam_label(self.streamer), (245, 245, 245)),
+            ('AUDIO', audio, (214, 214, 214)),
+        ]
+
+    def _streamer_network_lines(self, mode):
+        accent = self._accent(mode)
+        if not self.streamer['online']:
+            return [('INFO', 'Waiting for streamer status', accent)]
+        eth = 'up ' + (self.streamer['eth_oper'] or '-') if self.streamer['eth_carrier'] else 'down ' + (self.streamer['eth_oper'] or '-')
+        return [
+            ('UP / RET', f"{_fmt_uptime(self.streamer['uptime_s'])}   r:{self.streamer['retries']}", (245, 245, 245)),
+            ('ETH / RTMP', f"{eth.strip()}   {self.streamer['rtmp_state'] or '-'}", (214, 214, 214)),
+            ('LAN', f"tx:{self.streamer['tx_kbps']}   rx:{self.streamer['rx_kbps']} kbps", accent),
+        ]
+
+    def _streamer_system_lines(self, mode):
+        accent = self._accent(mode)
+        if not self.streamer['online']:
+            return [('INFO', 'No local Pi 4 system data yet', accent)]
+        temp = f"{self.streamer['temp_c']:.1f} C" if self.streamer['temp_c'] is not None else '-'
+        message = self.streamer['msg_text'] if self.streamer['msg_enabled'] and self.streamer['msg_text'] else 'off'
+        return [
+            ('TEMP / THR', f"{temp}   {self.streamer['throttled'] or '-'}", (245, 245, 245)),
+            ('MSG', _clip(message, 52), accent if self.streamer['msg_enabled'] else (214, 214, 214)),
+        ]
+
     def _audience_lines(self, mode):
         audience = self.status.get('audience') or {}
         lines = [
@@ -858,19 +1094,23 @@ class FramebufferScreen:
             return first.get('description') or first.get('reason') or first.get('type') or ''
         if audience.get('note'):
             return audience['note']
+        if self.streamer.get('error'):
+            return self.streamer['error']
+        if self.streamer.get('msg_enabled') and self.streamer.get('msg_text'):
+            return self.streamer['msg_text']
         return 'Animated standby view stays active while the Pi polls YouTube.'
 
     def _draw_card(self, draw, rect, title, lines, accent):
         x, y, w, h = rect
         draw.rounded_rectangle((x, y, x + w, y + h), radius=16, fill=(12, 18, 24), outline=accent, width=2)
-        draw.text((x + 14, y + 10), title, font=self.font_section, fill=(245, 245, 245))
-        line_y = y + 40
+        draw.text((x + 10, y + 8), title, font=self.font_section, fill=(245, 245, 245))
+        line_y = y + 28
         for label, value, color in lines:
             line = f'{label}: {value}' if label else value
-            for item in self._wrap_lines(draw, line, w - 24, self.font_text)[:4]:
-                draw.text((x + 14, line_y), item, font=self.font_text, fill=color)
-                line_y += 24
-                if line_y >= y + h - 18:
+            for item in self._wrap_lines(draw, line, w - 18, self.font_text)[:3]:
+                draw.text((x + 10, line_y), item, font=self.font_text, fill=color)
+                line_y += 18
+                if line_y >= y + h - 10:
                     return
 
     def _write_frame(self, image):
@@ -916,6 +1156,7 @@ class FramebufferScreen:
                 self.idle_since,
                 time.time(),
                 self.args.idle_seconds,
+                self.streamer['running'],
             )
 
             image = self.Image.new('RGB', (self.width, self.height), (2, 4, 8))
@@ -944,12 +1185,14 @@ class FramebufferScreen:
 
                 accent = self._accent(mode)
                 now_text = datetime.now().strftime('%H:%M:%S')
-                draw.text((18, 14), 'YouTube Companion HDMI', font=self.font_title, fill=(232, 244, 255))
-                mode_w, _ = self._text_size(draw, self._mode_label(mode), self.font_mode)
-                draw.text((self.width - mode_w - 18, 10), self._mode_label(mode), font=self.font_mode, fill=accent)
-                time_w, _ = self._text_size(draw, now_text, self.font_small)
-                draw.text((self.width - time_w - 18, 56), now_text, font=self.font_small, fill=(180, 198, 214))
-                draw.text((18, 50), self.args.web_url, font=self.font_small, fill=(148, 165, 180))
+                draw.text((18, 10), self._mode_label(mode), font=self.font_mode, fill=accent)
+                time_w, _ = self._text_size(draw, now_text, self.font_title)
+                draw.text((self.width - time_w - 18, 12), now_text, font=self.font_title, fill=(232, 244, 255))
+                if self.streamer['online']:
+                    state = 'LIVE' if self.streamer['running'] else 'IDLE'
+                    if self.streamer['running'] and self.streamer['retries'] > 0:
+                        state = 'RECOVER'
+                    draw.text((self.width - 94, 34), f'PI4 {state}', font=self.font_small, fill=(148, 165, 180))
 
                 if self.auth.get('pending'):
                     code = self.auth.get('user_code') or '---- ----'
@@ -959,18 +1202,23 @@ class FramebufferScreen:
                     draw.rounded_rectangle((code_x - 20, code_y - 8, code_x + code_w + 20, code_y + code_h + 12), radius=14, fill=(40, 32, 8), outline=(255, 214, 120), width=2)
                     draw.text((code_x, code_y), code, font=self.font_code, fill=(255, 232, 176))
 
-                top = 110 if not self.auth.get('pending') else 170
-                gap = 14
-                left_w = 386
+                top = 54 if not self.auth.get('pending') else 118
+                gap = 12
+                left_w = 376
                 right_w = self.width - left_w - gap - 36
-                self._draw_card(draw, (18, top, left_w, 142), 'SUMMARY', self._summary_lines(mode), accent)
-                self._draw_card(draw, (18 + left_w + gap, top, right_w, 142), 'AUDIENCE', self._audience_lines(mode), accent)
-                self._draw_card(draw, (18, top + 142 + gap, left_w, 124), 'SYSTEM', self._system_lines(mode), accent)
-                self._draw_card(draw, (18 + left_w + gap, top + 142 + gap, right_w, 124), 'NEXT STEP', [('1', 'Leave this screen on HDMI' if mode != 'offline' else 'Start youtube-companion.service', (245, 245, 245)), ('2', 'It will switch modes automatically', (214, 214, 214)), ('3', 'Warnings and auth prompts show here', accent)], accent)
+                summary_h = 92
+                lower_h = 92
+                sys_h = 64
+                self._draw_card(draw, (18, top, left_w, summary_h), 'STREAMER', self._streamer_overview_lines(mode), accent)
+                self._draw_card(draw, (18 + left_w + gap, top, right_w, summary_h), 'YOUTUBE', self._summary_lines(mode), accent)
+                self._draw_card(draw, (18, top + summary_h + gap, left_w, lower_h), 'NETWORK', self._streamer_network_lines(mode), accent)
+                self._draw_card(draw, (18 + left_w + gap, top + summary_h + gap, right_w, lower_h), 'AUDIENCE', self._audience_lines(mode), accent)
+                self._draw_card(draw, (18, top + summary_h + lower_h + gap * 2, left_w, sys_h), 'SYSTEM', self._streamer_system_lines(mode), accent)
+                self._draw_card(draw, (18 + left_w + gap, top + summary_h + lower_h + gap * 2, right_w, sys_h), 'STATUS', self._system_lines(mode), accent)
 
-                footer = _clip(self._footer_text(mode), 96)
-                draw.rounded_rectangle((18, self.height - 58, self.width - 18, self.height - 16), radius=14, fill=(10, 14, 18), outline=accent, width=2)
-                draw.text((30, self.height - 48), footer, font=self.font_text, fill=(232, 236, 240))
+                footer = _clip(self._footer_text(mode), 110)
+                draw.rounded_rectangle((18, self.height - 46, self.width - 18, self.height - 18), radius=10, fill=(10, 14, 18), outline=accent, width=1)
+                draw.text((28, self.height - 40), footer, font=self.font_small, fill=(232, 236, 240))
 
             self._write_frame(image)
             elapsed = time.time() - started
@@ -1001,6 +1249,7 @@ def main():
     parser.add_argument('--status-url', default='http://127.0.0.1:8091/status')
     parser.add_argument('--auth-url', default='http://127.0.0.1:8091/auth_status')
     parser.add_argument('--web-url', default='http://127.0.0.1:8091')
+    parser.add_argument('--streamer-status-url', default='')
     parser.add_argument('--poll-seconds', type=float, default=5.0)
     parser.add_argument('--http-timeout', type=float, default=3.0)
     parser.add_argument('--fps', type=int, default=30)

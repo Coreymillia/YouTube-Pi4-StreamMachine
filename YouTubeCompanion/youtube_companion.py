@@ -42,6 +42,8 @@ _DEFAULTS = {
     'oauth_client_id': '',
     'oauth_client_secret': '',
     'poll_interval_seconds': 15,
+    'streamer_status_host': '192.168.0.123',
+    'streamer_status_port': 8090,
 }
 
 _OAUTH_SCOPE = 'https://www.googleapis.com/auth/youtube.readonly'
@@ -57,6 +59,8 @@ def _load_cfg():
     cfg['listen_host'] = str(cfg.get('listen_host', '0.0.0.0')).strip() or '0.0.0.0'
     cfg['listen_port'] = int(cfg.get('listen_port', 8091))
     cfg['poll_interval_seconds'] = max(5, int(cfg.get('poll_interval_seconds', 15)))
+    cfg['streamer_status_host'] = str(cfg.get('streamer_status_host', '192.168.0.123')).strip()
+    cfg['streamer_status_port'] = max(1, int(cfg.get('streamer_status_port', 8090)))
     cfg['oauth_client_id'] = str(cfg.get('oauth_client_id', '')).strip()
     cfg['oauth_client_secret'] = str(cfg.get('oauth_client_secret', '')).strip()
     return cfg
@@ -537,6 +541,8 @@ _HTML = """<!DOCTYPE html>
       <div class="row"><span class="label">OAuth Client ID</span><input id="client-id" value="__CLIENT_ID__" placeholder="Google OAuth client ID"></div>
       <div class="row"><span class="label">OAuth Client Secret</span><input id="client-secret" type="password" value="__CLIENT_SECRET__" placeholder="Google OAuth client secret"></div>
       <div class="row"><span class="label">Poll interval (seconds)</span><input id="poll-seconds" value="__POLL_SECONDS__" placeholder="15"></div>
+      <div class="row"><span class="label">Streamer Pi address / hostname</span><input id="streamer-host" value="__STREAMER_HOST__" placeholder="192.168.0.123"></div>
+      <div class="row"><span class="label">Streamer Pi port</span><input id="streamer-port" value="__STREAMER_PORT__" placeholder="8090"></div>
       <div class="row" style="margin-top:12px"><button onclick="saveSettings()">Save Settings</button> <button onclick="startAuth()">Start Device Auth</button> <button onclick="clearToken()">Clear Token</button></div>
       <div class="row" id="save-msg"></div>
     </div>
@@ -583,7 +589,9 @@ _HTML = """<!DOCTYPE html>
     function saveSettings() {
       const body = 'oauth_client_id=' + encodeURIComponent(document.getElementById('client-id').value)
         + '&oauth_client_secret=' + encodeURIComponent(document.getElementById('client-secret').value)
-        + '&poll_interval_seconds=' + encodeURIComponent(document.getElementById('poll-seconds').value);
+        + '&poll_interval_seconds=' + encodeURIComponent(document.getElementById('poll-seconds').value)
+        + '&streamer_status_host=' + encodeURIComponent(document.getElementById('streamer-host').value)
+        + '&streamer_status_port=' + encodeURIComponent(document.getElementById('streamer-port').value);
       fetch('/settings', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body})
         .then(r => r.json()).then(d => text('save-msg', d.ok ? 'Saved' : d.msg || 'Save failed'));
     }
@@ -670,10 +678,12 @@ class _Handler(BaseHTTPRequestHandler):
             cfg = _load_cfg()
             cfg['oauth_client_id'] = get('oauth_client_id').strip()
             cfg['oauth_client_secret'] = get('oauth_client_secret').strip()
+            cfg['streamer_status_host'] = get('streamer_status_host', cfg['streamer_status_host']).strip()
             try:
                 cfg['poll_interval_seconds'] = max(5, int(get('poll_interval_seconds', cfg['poll_interval_seconds'])))
+                cfg['streamer_status_port'] = max(1, int(get('streamer_status_port', cfg['streamer_status_port'])))
             except ValueError:
-                self._json({'ok': False, 'msg': 'Poll interval must be a number'})
+                self._json({'ok': False, 'msg': 'Poll interval and streamer port must be numbers'})
                 return
             _save_cfg(cfg)
             _poll_once()
@@ -702,6 +712,8 @@ class _Handler(BaseHTTPRequestHandler):
             .replace('__CLIENT_ID__', html.escape(cfg.get('oauth_client_id', '')))
             .replace('__CLIENT_SECRET__', html.escape(cfg.get('oauth_client_secret', '')))
             .replace('__POLL_SECONDS__', str(cfg.get('poll_interval_seconds', 15)))
+            .replace('__STREAMER_HOST__', html.escape(cfg.get('streamer_status_host', '')))
+            .replace('__STREAMER_PORT__', str(cfg.get('streamer_status_port', 8090)))
         ).encode()
         self._send(200, body, 'text/html; charset=utf-8')
 
