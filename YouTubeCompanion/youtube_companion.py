@@ -44,6 +44,7 @@ _DEFAULTS = {
     'poll_interval_seconds': 15,
     'streamer_status_host': '192.168.0.123',
     'streamer_status_port': 8090,
+    'streamer_control_token': '',
 }
 
 _OAUTH_SCOPE = 'https://www.googleapis.com/auth/youtube.readonly'
@@ -61,6 +62,7 @@ def _load_cfg():
     cfg['poll_interval_seconds'] = max(5, int(cfg.get('poll_interval_seconds', 15)))
     cfg['streamer_status_host'] = str(cfg.get('streamer_status_host', '192.168.0.123')).strip()
     cfg['streamer_status_port'] = max(1, int(cfg.get('streamer_status_port', 8090)))
+    cfg['streamer_control_token'] = str(cfg.get('streamer_control_token', '')).strip()[:120]
     cfg['oauth_client_id'] = str(cfg.get('oauth_client_id', '')).strip()
     cfg['oauth_client_secret'] = str(cfg.get('oauth_client_secret', '')).strip()
     return cfg
@@ -543,6 +545,7 @@ _HTML = """<!DOCTYPE html>
       <div class="row"><span class="label">Poll interval (seconds)</span><input id="poll-seconds" value="__POLL_SECONDS__" placeholder="15"></div>
       <div class="row"><span class="label">Streamer Pi address / hostname</span><input id="streamer-host" value="__STREAMER_HOST__" placeholder="192.168.0.123"></div>
       <div class="row"><span class="label">Streamer Pi port</span><input id="streamer-port" value="__STREAMER_PORT__" placeholder="8090"></div>
+      <div class="row"><span class="label">Streamer control token</span><input id="streamer-control-token" type="password" value="__STREAMER_CONTROL_TOKEN__" placeholder="Needed only for Pi shutdown"></div>
       <div class="row" style="margin-top:12px"><button onclick="saveSettings()">Save Settings</button> <button onclick="startAuth()">Start Device Auth</button> <button onclick="clearToken()">Clear Token</button></div>
       <div class="row" id="save-msg"></div>
     </div>
@@ -591,7 +594,8 @@ _HTML = """<!DOCTYPE html>
         + '&oauth_client_secret=' + encodeURIComponent(document.getElementById('client-secret').value)
         + '&poll_interval_seconds=' + encodeURIComponent(document.getElementById('poll-seconds').value)
         + '&streamer_status_host=' + encodeURIComponent(document.getElementById('streamer-host').value)
-        + '&streamer_status_port=' + encodeURIComponent(document.getElementById('streamer-port').value);
+        + '&streamer_status_port=' + encodeURIComponent(document.getElementById('streamer-port').value)
+        + '&streamer_control_token=' + encodeURIComponent(document.getElementById('streamer-control-token').value);
       fetch('/settings', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body})
         .then(r => r.json()).then(d => text('save-msg', d.ok ? 'Saved' : d.msg || 'Save failed'));
     }
@@ -679,6 +683,7 @@ class _Handler(BaseHTTPRequestHandler):
             cfg['oauth_client_id'] = get('oauth_client_id').strip()
             cfg['oauth_client_secret'] = get('oauth_client_secret').strip()
             cfg['streamer_status_host'] = get('streamer_status_host', cfg['streamer_status_host']).strip()
+            cfg['streamer_control_token'] = get('streamer_control_token', cfg['streamer_control_token']).strip()[:120]
             try:
                 cfg['poll_interval_seconds'] = max(5, int(get('poll_interval_seconds', cfg['poll_interval_seconds'])))
                 cfg['streamer_status_port'] = max(1, int(get('streamer_status_port', cfg['streamer_status_port'])))
@@ -714,6 +719,7 @@ class _Handler(BaseHTTPRequestHandler):
             .replace('__POLL_SECONDS__', str(cfg.get('poll_interval_seconds', 15)))
             .replace('__STREAMER_HOST__', html.escape(cfg.get('streamer_status_host', '')))
             .replace('__STREAMER_PORT__', str(cfg.get('streamer_status_port', 8090)))
+            .replace('__STREAMER_CONTROL_TOKEN__', html.escape(cfg.get('streamer_control_token', '')))
         ).encode()
         self._send(200, body, 'text/html; charset=utf-8')
 

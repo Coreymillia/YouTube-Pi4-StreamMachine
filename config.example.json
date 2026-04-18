@@ -14,6 +14,7 @@
 
     "_youtube_comment": "YouTube RTMP stream key (from YouTube Studio → Go Live). otr_station_url sets the live radio audio overlaid on the stream — defaults to 1940s Radio if blank.",
     "youtube_stream_key": "",
+    "streamer_control_token": "",
     "otr_station_url": "http://149.255.60.195:8256/stream",
     "stream_message": {
         "enabled": false,

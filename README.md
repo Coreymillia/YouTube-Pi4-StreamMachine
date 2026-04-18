@@ -181,7 +181,7 @@ It runs as a **separate UI service** on the companion Pi and talks to the main P
 
 1. **Status** — shows live/idle state, active camera, uptime, LAN tx/rx, temp, and whether the on-stream message overlay is enabled
 2. **Snapshot** — shows the current `/snapshot` image scaled onto the 128x128 LCD when the preview is available
-3. **Control** — lets you start or stop the stream from the HAT; while idle, joystick up/down picks the camera and joystick press confirms the action
+3. **Control** — lets you start or stop the stream from the HAT; while idle, joystick up/down cycles through start-camera actions plus a graceful **Shutdown Pi4** action, and joystick press confirms the action
 
 ### Controls
 
@@ -191,13 +191,14 @@ It runs as a **separate UI service** on the companion Pi and talks to the main P
 | `KEY2` | Jump to **Snapshot** |
 | `KEY3` | Jump to **Control** |
 | `JOY ← / →` | Cycle modes |
-| `JOY ↑ / ↓` | Change selected camera in **Control** mode while idle |
+| `JOY ↑ / ↓` | Cycle idle **Control** actions (camera start or Pi 4 shutdown) |
 | `JOY ●` | Refresh or confirm the current mode action |
 
 ### Notes
 
-- The HAT UI reuses the main Pi's streamer endpoints: `/status`, `/snapshot`, `/start`, and `/stop`
+- The HAT UI reuses the main Pi's streamer endpoints: `/status`, `/snapshot`, `/start`, `/stop`, and an optional token-protected `/shutdown`
 - By default it reads `streamer_status_host` and `streamer_status_port` from the companion `config.json`, the same way the HDMI companion screen does
+- Set the same `streamer_control_token` on both the Pi 4 and the companion Pi if you want the HAT to trigger a graceful remote shutdown
 - Snapshot mode follows the existing streamer behavior, so preview snapshots are **disabled while live**
 - The start/stop action is intentionally **double-press to confirm** so you do not stop a stream by bumping the joystick
 - If your HAT is mounted upside down, you can invert the vertical joystick behavior with `--invert-vertical`
@@ -292,6 +293,7 @@ What it does:
 - Shows **OFFLINE**, **AUTH**, **READY**, **LIVE**, and **WARNING** states
 - Can also poll the main Pi 4 streamer `/status` endpoint so the HDMI screen replaces the day-to-day CYD dashboard with the same local fields: cam/audio, uptime/retries, ETH/RTMP, LAN traffic, and system/message data
 - Keeps the normal status dashboard during active use, then after about 5 minutes in **READY** switches to a dark matrix-style idle screen with a small clock
+- If the Pi 4 streamer itself is offline, switches straight into a dedicated **Pi4 offline** matrix standby screen instead of the normal READY dashboard
 - Surfaces YouTube health issues, views, average view duration, and concurrent viewers in large cards
 - Tries SDL fullscreen first, then falls back to direct `/dev/fb0` rendering on Raspberry Pi OS Lite if SDL cannot open HDMI cleanly
 - Switches automatically between standby/auth/live states without touching the CYD code

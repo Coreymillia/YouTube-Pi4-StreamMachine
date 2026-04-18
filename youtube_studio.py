@@ -84,6 +84,11 @@ _MESSAGE_DEFAULTS = {
     'text':    '',
 }
 
+
+def _get_control_token(cfg):
+    return str(cfg.get('streamer_control_token', '')).strip()[:120]
+
+
 def _get_quality(cfg):
     q = dict(_QUALITY_DEFAULTS)
     q.update(cfg.get('quality', {}))
@@ -1082,6 +1087,36 @@ class _ChatBot:
 
 
 _bot_thread = None
+_shutdown_pending = threading.Event()
+
+
+def _request_shutdown():
+    if _shutdown_pending.is_set():
+        return False, 'Shutdown already requested.'
+    _shutdown_pending.set()
+    threading.Thread(target=_shutdown_worker, daemon=True).start()
+    return True, 'Shutdown requested.'
+
+
+def _shutdown_worker():
+    try:
+        log.warning('Remote Pi shutdown requested')
+        stop_preview()
+        with _stream_lock:
+            running = _stream_state['running']
+        if running:
+            stop_stream()
+            deadline = time.time() + 12
+            while time.time() < deadline:
+                with _stream_lock:
+                    if not _stream_state['running']:
+                        break
+                time.sleep(0.25)
+        time.sleep(1.0)
+        subprocess.Popen(['sudo', '-n', '/sbin/shutdown', '-h', 'now'])
+    except Exception as exc:
+        _shutdown_pending.clear()
+        log.error('Remote shutdown failed: %s', exc)
 
 
 def start_bot():
@@ -1212,6 +1247,10 @@ details[open]>summary{{color:#aaa}}
     <label>YouTube Stream Key</label>
     <input type="password" id="stream-key" value="{stream_key}" placeholder="Paste key from YouTube Studio">
     <div class="hint">YouTube Studio → Go Live → Stream Key</div>
+
+    <label style="margin-top:12px">Remote Control Token</label>
+    <input type="password" id="streamer-control-token" value="{streamer_control_token}" placeholder="Needed only for remote Pi shutdown">
+    <div class="hint">Optional shared secret used by the companion Pi to request a graceful shutdown.</div>
 
     <label style="margin-top:12px">Away / Break Message</label>
     <textarea id="stream-message-text" rows="3" maxlength="120"
@@ -1356,11 +1395,13 @@ function stopStream() {{
 function saveSettings() {{
   var key = document.getElementById('stream-key').value;
   var otr = otrSel.value;
+  var controlToken = document.getElementById('streamer-control-token').value;
   var msg = document.getElementById('stream-message-text').value;
   var msgEnabled = document.getElementById('stream-message-enabled').checked ? '1' : '0';
   fetch('/settings', {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
     body:'youtube_stream_key='+encodeURIComponent(key)
       +'&otr_station_url='+encodeURIComponent(otr)
+      +'&streamer_control_token='+encodeURIComponent(controlToken)
       +'&stream_message_text='+encodeURIComponent(msg)
       +'&stream_message_enabled='+msgEnabled}})
   .then(r=>r.json()).then(d=>{{
@@ -1736,6 +1777,7 @@ def _render_dashboard():
     ip         = _get_local_ip()
     stream_key = cfg.get('youtube_stream_key', '')
     otr_url    = cfg.get('otr_station_url', _OTR_DEFAULT)
+    control_token = _get_control_token(cfg)
     msg_cfg    = _get_message_cfg(cfg)
     cam_names  = json.dumps({str(i): c['short'] for i, c in enumerate(_CAMERAS)})
     q          = _get_quality(cfg)
@@ -1765,6 +1807,7 @@ def _render_dashboard():
     return _DASHBOARD_HTML.format(
         ip=ip, port=_PORT,
         stream_key=stream_key,
+        streamer_control_token=html.escape(control_token),
         stream_message_text=html.escape(msg_cfg['text']),
         stream_message_checked='checked' if msg_cfg['enabled'] else '',
         cam_opts=_camera_options(0),
@@ -1837,6 +1880,19 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == '/stop':
             stop_stream()
             self._json({'ok': True, 'msg': 'Stopping…'})
+
+        elif path == '/shutdown':
+            cfg = _load_cfg()
+            expected = _get_control_token(cfg)
+            if not expected:
+                self._json({'ok': False, 'msg': 'Remote shutdown is disabled.'})
+                return
+            supplied = self.headers.get('X-Streamer-Control-Token', '').strip()
+            if supplied != expected:
+                self._json({'ok': False, 'msg': 'Invalid shutdown token.'})
+                return
+            ok, msg = _request_shutdown()
+            self._json({'ok': ok, 'msg': msg})
 
         elif path == '/switch':
             try:
@@ -1916,6 +1972,7 @@ class _Handler(BaseHTTPRequestHandler):
             prev_msg_cfg = _get_message_cfg(cfg)
             cfg['youtube_stream_key'] = get('youtube_stream_key').strip()
             cfg['otr_station_url']    = get('otr_station_url').strip() or _OTR_DEFAULT
+            cfg['streamer_control_token'] = get('streamer_control_token').strip()[:120]
             cfg['stream_message'] = {
                 'enabled': get('stream_message_enabled') == '1',
                 'text': get('stream_message_text'),
@@ -2037,6 +2094,7 @@ class _Handler(BaseHTTPRequestHandler):
             'preview_cam':    _prev_cam_name or '',
             'quality':        _get_quality(cfg),
             'stream_message': _get_message_cfg(cfg),
+            'shutdown_pending': _shutdown_pending.is_set(),
             'audio_name':     _otr_name(otr_url),
             'audio_silent':   otr_url == _OTR_SILENT,
             'rtmp_state':     rtmp_state,

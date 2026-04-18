@@ -242,8 +242,10 @@ def _derive_mode(status, auth, fetch_error):
     return 'ready'
 
 
-def _resolve_display_mode(base_mode, idle_since, now, idle_seconds, streamer_running):
+def _resolve_display_mode(base_mode, idle_since, now, idle_seconds, streamer_running, streamer_online):
     if base_mode == 'ready':
+        if not streamer_online:
+            return 'streamer_offline', None
         if streamer_running:
             return 'ready', None
         if idle_since is None:
@@ -283,6 +285,7 @@ class DotField:
             'offline': 0.35,
             'auth': 0.45,
             'ready': 0.6,
+            'streamer_offline': 0.4,
             'live': 0.4,
             'warning': 0.55,
         }.get(mode, 0.5)
@@ -298,6 +301,7 @@ class DotField:
             'offline': ((50, 90, 140), (110, 140, 180)),
             'auth': ((120, 170, 240), (255, 210, 110)),
             'ready': ((0, 220, 160), (70, 190, 255)),
+            'streamer_offline': ((28, 140, 74), (76, 210, 108)),
             'live': ((0, 190, 120), (60, 150, 235)),
             'warning': ((255, 120, 80), (255, 210, 90)),
         }
@@ -481,6 +485,7 @@ class CompanionScreen:
             'auth': (255, 196, 86),
             'ready': (78, 195, 255),
             'idle': (78, 185, 104),
+            'streamer_offline': (72, 188, 94),
             'live': (92, 220, 132),
             'warning': (255, int(120 + 70 * pulse), 90),
         }
@@ -492,6 +497,7 @@ class CompanionScreen:
             'auth': 'AUTH',
             'ready': 'READY',
             'idle': 'IDLE',
+            'streamer_offline': 'PI4 OFFLINE',
             'live': 'LIVE',
             'warning': 'WARNING',
         }[mode]
@@ -703,7 +709,7 @@ class CompanionScreen:
         self.screen.blit(panel, footer_rect.topleft)
         self._draw_text(_clip(line, 110), self.font_small, (232, 236, 240), footer_rect.x + 10, footer_rect.y + 6)
 
-    def _draw_idle_screen(self):
+    def _draw_idle_screen(self, footer_text='READY  Waiting for next stream', border_color=(30, 100, 42), footer_color=(150, 220, 158)):
         now_text = datetime.now().strftime('%H:%M')
         sub_text = datetime.now().strftime('%a %b %d')
         self.screen.fill((0, 5, 0))
@@ -723,9 +729,9 @@ class CompanionScreen:
 
         bottom = pygame.Surface((320, 44), pygame.SRCALPHA)
         bottom.fill((2, 8, 2, 205))
-        pygame.draw.rect(bottom, (30, 100, 42, 220), bottom.get_rect(), width=1, border_radius=12)
+        pygame.draw.rect(bottom, (*border_color, 220), bottom.get_rect(), width=1, border_radius=12)
         self.screen.blit(bottom, (18, self.height - 62))
-        self._draw_text('READY  Waiting for next stream', self.font_text, (150, 220, 158), 34, self.height - 51)
+        self._draw_text(footer_text, self.font_text, footer_color, 34, self.height - 51)
 
     def _draw_layout(self, mode):
         accent = self._accent(mode)
@@ -837,10 +843,18 @@ class CompanionScreen:
                 time.time(),
                 self.args.idle_seconds,
                 self.streamer['running'],
+                self.streamer['online'],
             )
 
-            if mode == 'idle':
-                self._draw_idle_screen()
+            if mode in {'idle', 'streamer_offline'}:
+                if mode == 'streamer_offline':
+                    self._draw_idle_screen(
+                        footer_text='PI4 OFFLINE  Matrix standby active',
+                        border_color=(42, 132, 68),
+                        footer_color=(160, 236, 172),
+                    )
+                else:
+                    self._draw_idle_screen()
             else:
                 self.screen.fill((2, 4, 8))
                 self.dots.update(dt, mode)
@@ -1132,7 +1146,7 @@ class FramebufferScreen:
         self.fb.seek(0)
         self.fb.write(raw)
 
-    def _draw_idle_frame(self, image, draw):
+    def _draw_idle_frame(self, image, draw, footer_text='READY  Waiting for next stream', border_color=(30, 100, 42), footer_color=(150, 220, 158)):
         now_text = datetime.now().strftime('%H:%M')
         sub_text = datetime.now().strftime('%a %b %d')
         self.matrix.update(1.0 / max(1, min(self.args.fps, 12)))
@@ -1142,8 +1156,8 @@ class FramebufferScreen:
         draw.rounded_rectangle((self.width - 206, 18, self.width - 18, 80), radius=14, fill=(2, 10, 2), outline=(36, 120, 52), width=1)
         draw.text((self.width - 186, 20), now_text, font=self.font_title, fill=(198, 248, 200))
         draw.text((self.width - 184, 50), sub_text, font=self.font_small, fill=(118, 180, 126))
-        draw.rounded_rectangle((18, self.height - 62, 338, self.height - 18), radius=12, fill=(2, 8, 2), outline=(30, 100, 42), width=1)
-        draw.text((34, self.height - 50), 'READY  Waiting for next stream', font=self.font_text, fill=(150, 220, 158))
+        draw.rounded_rectangle((18, self.height - 62, 338, self.height - 18), radius=12, fill=(2, 8, 2), outline=border_color, width=1)
+        draw.text((34, self.height - 50), footer_text, font=self.font_text, fill=footer_color)
 
     def run(self):
         frame_delay = 1.0 / max(1, min(self.args.fps, 12))
@@ -1157,13 +1171,23 @@ class FramebufferScreen:
                 time.time(),
                 self.args.idle_seconds,
                 self.streamer['running'],
+                self.streamer['online'],
             )
 
             image = self.Image.new('RGB', (self.width, self.height), (2, 4, 8))
             draw = self.ImageDraw.Draw(image)
-            if mode == 'idle':
+            if mode in {'idle', 'streamer_offline'}:
                 image.paste((0, 5, 0), (0, 0, self.width, self.height))
-                self._draw_idle_frame(image, draw)
+                if mode == 'streamer_offline':
+                    self._draw_idle_frame(
+                        image,
+                        draw,
+                        footer_text='PI4 OFFLINE  Matrix standby active',
+                        border_color=(42, 132, 68),
+                        footer_color=(160, 236, 172),
+                    )
+                else:
+                    self._draw_idle_frame(image, draw)
             else:
                 self.dots.update(frame_delay, mode)
                 for dot in self.dots.dots:
@@ -1172,6 +1196,7 @@ class FramebufferScreen:
                         'offline': ((50, 90, 140), (110, 140, 180)),
                         'auth': ((120, 170, 240), (255, 210, 110)),
                         'ready': ((0, 220, 160), (70, 190, 255)),
+                        'streamer_offline': ((28, 140, 74), (76, 210, 108)),
                         'live': ((0, 190, 120), (60, 150, 235)),
                         'warning': ((255, 120, 80), (255, 210, 90)),
                     }.get(mode, ((0, 220, 160), (70, 190, 255)))

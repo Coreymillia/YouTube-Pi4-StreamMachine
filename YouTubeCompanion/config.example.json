@@ -5,6 +5,7 @@
     "poll_interval_seconds": 15,
     "streamer_status_host": "192.168.0.123",
     "streamer_status_port": 8090,
+    "streamer_control_token": "",
     "oauth_client_id": "",
     "oauth_client_secret": ""
 }

@@ -88,6 +88,7 @@ def _load_cfg():
     cfg = {
         'streamer_status_host': '',
         'streamer_status_port': 8090,
+        'streamer_control_token': '',
     }
     try:
         with open(_CONFIG_PATH) as f:
@@ -101,6 +102,7 @@ def _load_cfg():
         cfg['streamer_status_port'] = max(1, int(cfg.get('streamer_status_port', 8090)))
     except (TypeError, ValueError):
         cfg['streamer_status_port'] = 8090
+    cfg['streamer_control_token'] = str(cfg.get('streamer_control_token', '')).strip()[:120]
     return cfg
 
 
@@ -117,11 +119,14 @@ def _resolve_base_url(base_url):
 class StudioHatUI:
     def __init__(self, args):
         self.args = args
+        cfg = _load_cfg()
         self.base_url = _resolve_base_url(args.base_url)
         self.status_url = self.base_url + '/status'
         self.snapshot_url = self.base_url + '/snapshot'
         self.start_url = self.base_url + '/start'
         self.stop_url = self.base_url + '/stop'
+        self.shutdown_url = self.base_url + '/shutdown'
+        self.control_token = cfg.get('streamer_control_token', '')
 
         self.width = 128
         self.height = 128
@@ -136,6 +141,7 @@ class StudioHatUI:
         self.tx_kbps = 0
         self.rx_kbps = 0
         self.selected_cam = 1
+        self.control_index = 0
         self.notice = ''
         self.notice_until = 0.0
         self.confirm_action = ''
@@ -186,6 +192,8 @@ class StudioHatUI:
         if data is not None:
             payload = urllib.parse.urlencode(data).encode()
             headers['Content-Type'] = 'application/x-www-form-urlencoded'
+        if url == self.shutdown_url and self.control_token:
+            headers['X-Streamer-Control-Token'] = self.control_token
         req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
         with urllib.request.urlopen(req, timeout=self.args.http_timeout) as resp:
             body = resp.read().decode() or '{}'
@@ -217,6 +225,8 @@ class StudioHatUI:
             choices = self._camera_choices()
             if self.selected_cam not in choices:
                 self.selected_cam = 1 if 1 in choices else choices[0]
+            if self.control_index >= len(self._idle_control_actions()):
+                self.control_index = 0
         except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError) as exc:
             self.fetch_error = str(exc)
             self.status = {}
@@ -245,13 +255,38 @@ class StudioHatUI:
     def _current_action(self):
         if self.status.get('running'):
             return 'stop'
-        return f'start:{self.selected_cam}'
+        actions = self._idle_control_actions()
+        if not actions:
+            return 'shutdown'
+        self.control_index = min(self.control_index, len(actions) - 1)
+        action = actions[self.control_index]
+        if action.startswith('start:'):
+            try:
+                self.selected_cam = int(action.split(':', 1)[1])
+            except ValueError:
+                pass
+        return action
+
+    def _idle_control_actions(self):
+        actions = [f'start:{cam_idx}' for cam_idx in self._camera_choices()]
+        actions.append('shutdown')
+        return actions
+
+    def _action_label(self, action):
+        if action == 'stop':
+            return 'STOP STREAM'
+        if action == 'shutdown':
+            return 'SHUTDOWN PI4'
+        cam_idx = int(action.split(':', 1)[1])
+        return f'START {self._camera_label(cam_idx)}'
 
     def _execute_control_action(self):
         action = self._current_action()
         try:
             if action == 'stop':
                 result = self._post(self.stop_url)
+            elif action == 'shutdown':
+                result = self._post(self.shutdown_url)
             else:
                 cam_idx = action.split(':', 1)[1]
                 result = self._post(self.start_url, {'cam_idx': cam_idx})
@@ -272,6 +307,8 @@ class StudioHatUI:
         self.confirm_until = now + 3.0
         if action == 'stop':
             self._set_notice('Press again to stop')
+        elif action == 'shutdown':
+            self._set_notice('Press again to shut down Pi4')
         else:
             self._set_notice(f'Press again to start {self._camera_label(self.selected_cam)}')
 
@@ -302,15 +339,17 @@ class StudioHatUI:
             self._cycle_mode(1)
 
         if self.mode == MODE_CONTROL and not self.status.get('running'):
-            cams = self._camera_choices()
-            if len(cams) > 1:
-                idx = cams.index(self.selected_cam) if self.selected_cam in cams else 0
+            actions = self._idle_control_actions()
+            if actions:
                 if self._vertical_edge('up', current):
-                    self.selected_cam = cams[(idx - 1) % len(cams)]
+                    self.control_index = (self.control_index - 1) % len(actions)
                     self.confirm_action = ''
                 if self._vertical_edge('down', current):
-                    self.selected_cam = cams[(idx + 1) % len(cams)]
+                    self.control_index = (self.control_index + 1) % len(actions)
                     self.confirm_action = ''
+                action = actions[self.control_index]
+                if action.startswith('start:'):
+                    self.selected_cam = int(action.split(':', 1)[1])
 
         if self._edge('press', current):
             if self.mode == MODE_STATUS:
@@ -419,12 +458,26 @@ class StudioHatUI:
             draw.text((10, 92), _clip(self.status.get('cam_name') or '-', 18), font=self.font_text, fill=(230, 230, 230))
             hint = 'Press twice to stop'
         else:
-            draw.rectangle((8, 28, 120, 86), outline=(90, 200, 110), width=2, fill=(12, 36, 16))
-            draw.text((18, 36), 'START', font=self.font_title, fill=(120, 220, 130))
-            draw.text((18, 56), 'STREAM', font=self.font_title, fill=(220, 255, 220))
-            draw.text((10, 92), _clip(self._camera_label(self.selected_cam), 18), font=self.font_text, fill=(230, 230, 230))
-            draw.text((10, 106), 'UP/DOWN pick cam', font=self.font_small, fill=(170, 170, 170))
-            hint = 'Press twice to start'
+            action = self._current_action()
+            if action == 'shutdown':
+                outline = (220, 180, 80)
+                fill = (54, 26, 8)
+                title = ('SHUT', 'DOWN')
+                title_fill = (255, 210, 120)
+                detail = 'PI 4 graceful off'
+                hint = 'Press twice to shut down'
+            else:
+                outline = (90, 200, 110)
+                fill = (12, 36, 16)
+                title = ('START', 'STREAM')
+                title_fill = (120, 220, 130)
+                detail = self._camera_label(self.selected_cam)
+                hint = 'Press twice to start'
+            draw.rectangle((8, 28, 120, 86), outline=outline, width=2, fill=fill)
+            draw.text((18, 36), title[0], font=self.font_title, fill=title_fill)
+            draw.text((18, 56), title[1], font=self.font_title, fill=(220, 255, 220) if action != 'shutdown' else (255, 236, 180))
+            draw.text((10, 92), _clip(detail, 18), font=self.font_text, fill=(230, 230, 230))
+            draw.text((10, 106), 'UP/DOWN choose', font=self.font_small, fill=(170, 170, 170))
 
         if self.confirm_action and time.time() < self.confirm_until:
             secs = max(0, int(self.confirm_until - time.time()) + 1)
