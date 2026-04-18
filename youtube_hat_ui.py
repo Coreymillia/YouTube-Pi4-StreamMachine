@@ -5,6 +5,7 @@ import argparse
 import io
 import json
 import os
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -116,6 +117,63 @@ def _resolve_base_url(base_url):
     return 'http://127.0.0.1:8090'
 
 
+class MatrixRainLite:
+    _CHARS = '01[]{}<>/\\+-=*#@!?$%&'
+
+    def __init__(self, width, height, column_width=10, row_height=10):
+        self.width = width
+        self.height = height
+        self.column_width = max(8, column_width)
+        self.row_height = max(8, row_height)
+        self._build_streams()
+
+    def _build_streams(self):
+        self.columns = max(8, self.width // self.column_width)
+        self.streams = [self._spawn(col, initial=True) for col in range(self.columns)]
+
+    def _spawn(self, col, initial=False):
+        length = random.randint(5, 11)
+        head = random.uniform(-self.height * 0.8, self.height if initial else 0)
+        return {
+            'col': col,
+            'head': head,
+            'speed': random.uniform(24, 58),
+            'length': length,
+            'chars': [random.choice(self._CHARS) for _ in range(length + 4)],
+            'mutate_at': time.time() + random.uniform(0.04, 0.18),
+        }
+
+    def update(self, dt):
+        now = time.time()
+        for idx, stream in enumerate(self.streams):
+            stream['head'] += stream['speed'] * dt
+            if now >= stream['mutate_at']:
+                stream['chars'][random.randrange(len(stream['chars']))] = random.choice(self._CHARS)
+                stream['mutate_at'] = now + random.uniform(0.05, 0.16)
+            if stream['head'] - (stream['length'] * self.row_height) > self.height + self.row_height:
+                self.streams[idx] = self._spawn(stream['col'])
+
+    def glyphs(self):
+        for stream in self.streams:
+            col_x = stream['col'] * self.column_width + 3
+            head_row = int(stream['head'] // self.row_height)
+            for offset in range(stream['length']):
+                row = head_row - offset
+                if row < 0:
+                    continue
+                y = row * self.row_height
+                if y >= self.height:
+                    continue
+                if offset == 0:
+                    color = (190, 255, 194)
+                elif offset == 1:
+                    color = (110, 236, 122)
+                else:
+                    fade = max(0.18, 1.0 - (offset / max(1, stream['length'])))
+                    color = (0, int(150 * fade) + 10, 0)
+                yield col_x, y, stream['chars'][offset], color
+
+
 class StudioHatUI:
     def __init__(self, args):
         self.args = args
@@ -151,6 +209,9 @@ class StudioHatUI:
         self.font_title = _font(_FONT_PATH_BOLD, 16)
         self.font_text = _font(_FONT_PATH, 11)
         self.font_small = _font(_FONT_PATH, 9)
+        self.font_matrix = _font(_FONT_PATH_BOLD, 10)
+        self.matrix = MatrixRainLite(self.width, self.height)
+        self.last_frame_at = time.time()
 
         LCD_Config.GPIO_Init()
         self.lcd = LCD_1in44.LCD()
@@ -500,11 +561,34 @@ class StudioHatUI:
         lines.append(current)
         return lines
 
+    def _draw_offline_matrix(self, image, draw):
+        now = time.time()
+        dt = max(0.02, min(0.20, now - self.last_frame_at))
+        self.matrix.update(dt)
+        image.paste((0, 6, 0), (0, 0, self.width, self.height))
+        for x, y, char, color in self.matrix.glyphs():
+            draw.text((x, y), char, font=self.font_matrix, fill=color)
+
+        draw.rectangle((0, 0, self.width, 16), fill=(8, 16, 10))
+        draw.text((4, 2), 'PI4 OFFLINE', font=self.font_header, fill=(132, 236, 144))
+        draw.text((95, 2), time.strftime('%H:%M'), font=self.font_small, fill=(164, 200, 164))
+
+        panel = Image.new('RGBA', (112, 46), (2, 10, 2, 210))
+        panel_draw = ImageDraw.Draw(panel)
+        panel_draw.rounded_rectangle((0, 0, 111, 45), radius=10, outline=(42, 132, 68), width=1, fill=(2, 10, 2, 210))
+        image.alpha_composite(panel, (8, 38))
+        draw = ImageDraw.Draw(image)
+        draw.text((18, 48), 'Matrix standby', font=self.font_text, fill=(186, 244, 190))
+        draw.text((26, 64), 'Streamer down', font=self.font_small, fill=(150, 220, 158))
+        self._draw_footer(draw, 'JOY press refresh')
+
     def _render(self):
         base = Image.new('RGBA', (self.width, self.height), (0, 0, 0, 255))
         draw = ImageDraw.Draw(base)
 
-        if self.mode == MODE_STATUS:
+        if self.fetch_error:
+            self._draw_offline_matrix(base, draw)
+        elif self.mode == MODE_STATUS:
             self._draw_header(draw)
             self._draw_status_mode(draw)
         elif self.mode == MODE_SNAPSHOT:
@@ -517,6 +601,7 @@ class StudioHatUI:
         if self.args.rotate_180:
             output = output.rotate(180)
         self.lcd.LCD_ShowImage(output, 0, 0)
+        self.last_frame_at = time.time()
 
     def run(self):
         while True:

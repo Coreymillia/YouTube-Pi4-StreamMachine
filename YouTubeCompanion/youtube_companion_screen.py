@@ -243,9 +243,9 @@ def _derive_mode(status, auth, fetch_error):
 
 
 def _resolve_display_mode(base_mode, idle_since, now, idle_seconds, streamer_running, streamer_online):
+    if not streamer_online and base_mode not in {'offline', 'auth'}:
+        return 'streamer_offline', None
     if base_mode == 'ready':
-        if not streamer_online:
-            return 'streamer_offline', None
         if streamer_running:
             return 'ready', None
         if idle_since is None:
