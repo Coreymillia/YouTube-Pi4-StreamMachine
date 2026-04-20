@@ -9,43 +9,43 @@ Channel: [youtube.com/@coreymillia](https://www.youtube.com/@coreymillia)
 ## Screenshots
 
 ### Stream Control + Live Focus Preview
-![Stream Control and Focus Preview](IMG_20260410_153439755_HDR.jpg)
+![Stream Control and Focus Preview](images/IMG_20260410_153439755_HDR.jpg)
 *The left panel controls the stream. The right panel shows a live 5fps MJPEG preview — adjust your lens in real time without clicking a shutter. Here showing an engraved nickel under the HQ camera.*
 
 ### Quality Controls + Chat Bot Panel
-![Quality Controls and Chat Bot](IMG_20260410_153512234_HDR.jpg)
+![Quality Controls and Chat Bot](images/IMG_20260410_153512234_HDR.jpg)
 *Brightness, Contrast, Saturation, Sharpness, Zoom, and White Balance sliders. Below: the YouTube Live Chat Bot configuration panel with headless message, random messages, and keyword triggers.*
 
 ### The Bench Setup
-![Coin Engraving Bench](IMG_20260410_155323931_HDR.jpg)
+![Coin Engraving Bench](images/IMG_20260410_155323931_HDR.jpg)
 *The actual workbench — Leica microscope, HQ camera on a gooseneck arm, engraving tools, polished coins, and the YouTube Studio UI visible on a tablet in the corner. This is what "bench chaos" looks like when it's working.*
 
 ### CYD Stream Dashboard
-![CYD Stream Dashboard](IMG_20260412_141619432_HDR.jpg)
+![CYD Stream Dashboard](images/IMG_20260412_141619432_HDR.jpg)
 *The ESP32 Cheap Yellow Display acting as a compact stream monitor — live status, LAN traffic, temperature, retries, and one-tap controls without opening the browser UI.*
 
 ### CYD Snapshot Mode
-![CYD Snapshot Mode](IMG_20260412_175145104_HDR.jpg)
+![CYD Snapshot Mode](images/IMG_20260412_175145104_HDR.jpg)
 *Snapshot mode on the CYD for quick alignment checks. It pulls a still JPEG from the Pi preview path and can auto-refresh or be refreshed manually from the touchscreen.*
 
 ### YouTube Companion CYD
-![YouTube Companion CYD](IMG_20260414_162620026_HDR.jpg)
+![YouTube Companion CYD](images/IMG_20260414_162620026_HDR.jpg)
 *A dedicated CYD for the YouTube Companion service — showing authorized/ready state, no active broadcast yet, and the YouTube-side status cards before going live.*
 
 ### YouTube Companion CYD Warning View
-![YouTube Companion CYD Warning View](IMG_20260414_231044655_HDR.jpg)
+![YouTube Companion CYD Warning View](images/IMG_20260414_231044655_HDR.jpg)
 *The companion CYD while live — showing the current broadcast, active stream state, and a YouTube-side ingest warning surfaced directly on the dashboard.*
 
 ### YouTube Companion HDMI Status Screen
-![YouTube Companion HDMI Status Screen](IMG_20260416_185246804_HDR.jpg)
+![YouTube Companion HDMI Status Screen](images/IMG_20260416_185246804_HDR.jpg)
 *The Pi Zero HDMI display after the dashboard merge — local Pi 4 streamer status on the left, YouTube companion status on the right, and the full CYD-style day-to-day monitor now fitting the 7-inch screen.*
 
 ### YouTube Companion HDMI Idle Matrix Mode
-![YouTube Companion HDMI Idle Matrix Mode](IMG_20260416_010956502_HDR.jpg)
+![YouTube Companion HDMI Idle Matrix Mode](images/IMG_20260416_010956502_HDR.jpg)
 *After sitting in READY for a while, the HDMI display can switch to a dark matrix-style idle screen with a small clock, then snap back to the full dashboard when YouTube state changes.*
 
 ### YouTube Companion LCD HAT Status Mode
-![YouTube Companion LCD HAT Status Mode](IMG_20260417_131211056_HDR.jpg)
+![YouTube Companion LCD HAT Status Mode](images/IMG_20260417_131211056_HDR.jpg)
 *The Pi Zero companion with a Waveshare 1.44-inch LCD HAT attached — showing the compact local status mode that can stay mounted full-time for quick checks, snapshots, and stream start/stop control without touching the web UI.*
 
 ---
