@@ -4,12 +4,14 @@
 import argparse
 import io
 import json
+import math
 import os
 import random
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -62,6 +64,20 @@ _FONT_PATH = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
 _RESAMPLE = getattr(getattr(Image, 'Resampling', Image), 'LANCZOS', Image.BICUBIC)
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH = os.path.join(_PROJECT_DIR, 'config.json')
+_HAT_STATS_PATH = os.path.join(_PROJECT_DIR, 'hat_stats.json')
+
+OFFLINE_MODE_MATRIX = 0
+OFFLINE_MODE_CLOCK = 1
+OFFLINE_MODE_STATS = 2
+OFFLINE_MODE_RETRO = 3
+OFFLINE_MODE_PLASMA = 4
+OFFLINE_MODE_LABELS = {
+    OFFLINE_MODE_MATRIX: 'MATRIX',
+    OFFLINE_MODE_CLOCK: 'CLOCK',
+    OFFLINE_MODE_STATS: 'STATS',
+    OFFLINE_MODE_RETRO: 'RETRO',
+    OFFLINE_MODE_PLASMA: 'PLASMA',
+}
 
 
 def _font(path, size):
@@ -83,6 +99,204 @@ def _fmt_uptime(seconds):
     hours, rem = divmod(total, 3600)
     minutes, secs = divmod(rem, 60)
     return f'{hours:02d}:{minutes:02d}:{secs:02d}'
+
+
+def _fmt_compact_duration(seconds):
+    total = max(0, int(seconds or 0))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f'{days}d {hours:02d}h'
+    if hours:
+        return f'{hours}h {minutes:02d}m'
+    return f'{minutes}m'
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _read_system_uptime():
+    try:
+        with open('/proc/uptime') as f:
+            return _safe_float(f.read().split()[0], 0.0)
+    except (FileNotFoundError, IndexError, OSError, ValueError):
+        return 0.0
+
+
+def _default_hat_stats():
+    return {
+        'total_seconds': 0.0,
+        'daily_seconds': {},
+        'updated_at': 0,
+    }
+
+
+def _load_hat_stats():
+    stats = _default_hat_stats()
+    try:
+        with open(_HAT_STATS_PATH) as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return stats
+    if not isinstance(raw, dict):
+        return stats
+
+    stats['total_seconds'] = max(0.0, _safe_float(raw.get('total_seconds')))
+    stats['updated_at'] = max(0, int(_safe_float(raw.get('updated_at'))))
+    daily = raw.get('daily_seconds') or {}
+    if isinstance(daily, dict):
+        for day, value in daily.items():
+            day_key = str(day).strip()[:10]
+            if len(day_key) == 10:
+                stats['daily_seconds'][day_key] = max(0.0, _safe_float(value))
+    return stats
+
+
+def _save_hat_stats(stats):
+    daily = stats.get('daily_seconds') or {}
+    if len(daily) > 400:
+        keep = set(sorted(daily)[-400:])
+        daily = {key: daily[key] for key in sorted(daily) if key in keep}
+        stats['daily_seconds'] = daily
+    payload = {
+        'total_seconds': round(_safe_float(stats.get('total_seconds')), 2),
+        'daily_seconds': {key: round(_safe_float(value), 2) for key, value in sorted(daily.items())},
+        'updated_at': int(_safe_float(stats.get('updated_at'))),
+    }
+    with open(_HAT_STATS_PATH, 'w') as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
+class RetroGeometryLite:
+    _PALETTE = [
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 0),
+        (0, 255, 120),
+        (255, 140, 0),
+        (140, 80, 255),
+        (255, 0, 120),
+        (0, 140, 255),
+    ]
+
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.time = 0.0
+        self.shapes = [self._spawn(initial=True) for _ in range(8)]
+
+    def _spawn(self, initial=False):
+        size = random.randint(8, 24)
+        return {
+            'type': random.choice(('circle', 'triangle', 'line', 'box')),
+            'x': random.uniform(0, self.width),
+            'y': random.uniform(0, self.height) if initial else random.uniform(12, self.height - 12),
+            'size': size,
+            'color': random.choice(self._PALETTE),
+            'angle': random.uniform(0.0, math.tau),
+            'spin': random.uniform(-1.1, 1.1),
+            'speed': random.uniform(8.0, 26.0),
+            'direction': random.uniform(0.0, math.tau),
+            'life': random.uniform(8.0, 18.0),
+            'pulse': random.uniform(1.2, 3.5),
+        }
+
+    def update(self, dt):
+        self.time += dt
+        for idx, shape in enumerate(self.shapes):
+            shape['x'] += math.cos(shape['direction']) * shape['speed'] * dt
+            shape['y'] += math.sin(shape['direction']) * shape['speed'] * dt
+            shape['angle'] += shape['spin'] * dt
+            shape['life'] -= dt
+            if shape['x'] < -20 or shape['x'] > self.width + 20:
+                shape['direction'] = math.pi - shape['direction']
+            if shape['y'] < -20 or shape['y'] > self.height + 20:
+                shape['direction'] = -shape['direction']
+            if shape['life'] <= 0:
+                self.shapes[idx] = self._spawn()
+
+    def draw(self, image, draw):
+        image.paste((3, 3, 8), (0, 0, self.width, self.height))
+        grid = (18, 18, 30)
+        for x in range(0, self.width, 16):
+            draw.line((x, 0, x, self.height), fill=grid)
+        for y in range(0, self.height, 16):
+            draw.line((0, y, self.width, y), fill=grid)
+
+        for y in range(6, self.height, 5):
+            if (y // 5) % 2 == 0:
+                draw.line((0, y, self.width, y), fill=(10, 10, 12))
+
+        for shape in self.shapes:
+            size = int(shape['size'] * (1.0 + 0.18 * math.sin(self.time * shape['pulse'])))
+            x = int(shape['x'])
+            y = int(shape['y'])
+            color = shape['color']
+            if shape['type'] == 'circle':
+                draw.ellipse((x - size, y - size, x + size, y + size), outline=color, width=2)
+            elif shape['type'] == 'line':
+                dx = int(math.cos(shape['angle']) * size)
+                dy = int(math.sin(shape['angle']) * size)
+                draw.line((x - dx, y - dy, x + dx, y + dy), fill=color, width=2)
+            elif shape['type'] == 'box':
+                draw.rectangle((x - size, y - size, x + size, y + size), outline=color, width=2)
+            else:
+                points = []
+                for idx in range(3):
+                    angle = shape['angle'] + idx * (math.tau / 3.0)
+                    points.append((int(x + math.cos(angle) * size), int(y + math.sin(angle) * size)))
+                draw.polygon(points, outline=color, width=2)
+
+
+class PlasmaFieldLite:
+    def __init__(self, width, height, scale=4):
+        self.width = width
+        self.height = height
+        self.scale = max(2, scale)
+        self.grid_w = max(8, width // self.scale)
+        self.grid_h = max(8, height // self.scale)
+        self.time = 0.0
+        self.palette = self._build_palette()
+
+    def _build_palette(self):
+        palette = []
+        for idx in range(256):
+            t = idx / 255.0
+            palette.append(
+                (
+                    int(128 + 127 * math.sin(t * math.tau)),
+                    int(128 + 127 * math.sin(t * math.tau + math.pi / 3.0)),
+                    int(128 + 127 * math.sin(t * math.tau + 2.0 * math.pi / 3.0)),
+                )
+            )
+        return palette
+
+    def update(self, dt):
+        self.time += dt * 1.8
+
+    def draw(self):
+        image = Image.new('RGB', (self.grid_w, self.grid_h), (0, 0, 0))
+        pix = image.load()
+        cx = self.grid_w / 2.0
+        cy = self.grid_h / 2.0
+        for y in range(self.grid_h):
+            for x in range(self.grid_w):
+                dx = x - cx
+                dy = y - cy
+                dist = math.sqrt(dx * dx + dy * dy)
+                value = (
+                    math.sin((x + self.time * 3.0) / 3.1)
+                    + math.sin((y + self.time * 2.0) / 2.2)
+                    + math.sin((x + y + self.time * 2.6) / 4.3)
+                    + math.sin((dist + self.time * 4.2) / 2.4)
+                )
+                pix[x, y] = self.palette[int(((value + 4.0) / 8.0) * 255) % 256]
+        return image.resize((self.width, self.height), _RESAMPLE)
 
 
 def _load_cfg():
@@ -204,13 +418,25 @@ class StudioHatUI:
         self.notice_until = 0.0
         self.confirm_action = ''
         self.confirm_until = 0.0
+        self.offline_mode = OFFLINE_MODE_MATRIX
+        self.last_online_at = 0.0
+        self.stream_stats = _load_hat_stats()
+        self.stats_dirty = False
+        self.last_stats_save = 0.0
+        self.last_stream_sample = None
+        self.last_stream_running = False
 
         self.font_header = _font(_FONT_PATH_BOLD, 12)
         self.font_title = _font(_FONT_PATH_BOLD, 16)
         self.font_text = _font(_FONT_PATH, 11)
         self.font_small = _font(_FONT_PATH, 9)
         self.font_matrix = _font(_FONT_PATH_BOLD, 10)
+        self.font_clock = _font(_FONT_PATH_BOLD, 28)
+        self.font_clock_small = _font(_FONT_PATH_BOLD, 14)
+        self.font_metric = _font(_FONT_PATH_BOLD, 13)
         self.matrix = MatrixRainLite(self.width, self.height)
+        self.retro = RetroGeometryLite(self.width, self.height)
+        self.plasma = PlasmaFieldLite(self.width, self.height)
         self.last_frame_at = time.time()
 
         LCD_Config.GPIO_Init()
@@ -264,14 +490,79 @@ class StudioHatUI:
         self.notice = _clip(text, 26)
         self.notice_until = time.time() + seconds
 
+    def _mark_stream_seconds(self, delta, now):
+        if delta <= 0:
+            return
+        daily = self.stream_stats.setdefault('daily_seconds', {})
+        day_key = time.strftime('%Y-%m-%d', time.localtime(now))
+        daily[day_key] = _safe_float(daily.get(day_key)) + delta
+        self.stream_stats['total_seconds'] = _safe_float(self.stream_stats.get('total_seconds')) + delta
+        self.stream_stats['updated_at'] = int(now)
+        self.stats_dirty = True
+
+    def _flush_stream_stats(self, force=False):
+        now = time.time()
+        if not self.stats_dirty:
+            return
+        if not force and now - self.last_stats_save < 20.0:
+            return
+        _save_hat_stats(self.stream_stats)
+        self.stats_dirty = False
+        self.last_stats_save = now
+
+    def _update_stream_stats(self, now, running):
+        if self.last_stream_sample is not None and self.last_stream_running and running:
+            self._mark_stream_seconds(max(0.0, now - self.last_stream_sample), now)
+        self.last_stream_sample = now
+        self.last_stream_running = running
+        self._flush_stream_stats(force=not running)
+
+    def _handle_stream_disconnect(self):
+        self.last_stream_sample = None
+        self.last_stream_running = False
+        self._flush_stream_stats(force=True)
+
+    def _cycle_offline_mode(self, step):
+        total = len(OFFLINE_MODE_LABELS)
+        self.offline_mode = (self.offline_mode + step) % total
+
+    def _month_totals(self, count=12):
+        buckets = {}
+        for day_key, value in (self.stream_stats.get('daily_seconds') or {}).items():
+            buckets[day_key[:7]] = buckets.get(day_key[:7], 0.0) + _safe_float(value)
+
+        cursor = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        months = []
+        for _ in range(count):
+            months.append(cursor.strftime('%Y-%m'))
+            if cursor.month == 1:
+                cursor = cursor.replace(year=cursor.year - 1, month=12)
+            else:
+                cursor = cursor.replace(month=cursor.month - 1)
+        months.reverse()
+        return [(month, buckets.get(month, 0.0)) for month in months]
+
+    def _last_seen_label(self):
+        if not self.last_online_at:
+            return 'never'
+        delta = max(0, int(time.time() - self.last_online_at))
+        if delta < 60:
+            return f'{delta}s ago'
+        if delta < 3600:
+            return f'{delta // 60}m ago'
+        return f'{delta // 3600}h ago'
+
     def _refresh_status(self, force=False):
         now = time.time()
         if not force and now - self.last_status_refresh < self.args.poll_seconds:
             return
         self.last_status_refresh = now
+        was_offline = bool(self.fetch_error)
         try:
             self.status = self._fetch_json(self.status_url)
             self.fetch_error = ''
+            self.last_online_at = now
+            self._update_stream_stats(now, bool(self.status.get('running')))
 
             eth = self.status.get('eth0') or {}
             tx_now = eth.get('tx_bytes')
@@ -289,8 +580,11 @@ class StudioHatUI:
             if self.control_index >= len(self._idle_control_actions()):
                 self.control_index = 0
         except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+            self._handle_stream_disconnect()
             self.fetch_error = str(exc)
             self.status = {}
+            if not was_offline:
+                self.offline_mode = OFFLINE_MODE_MATRIX
 
     def _refresh_snapshot(self, force=False):
         now = time.time()
@@ -393,6 +687,17 @@ class StudioHatUI:
         elif self._edge('key3', current):
             self.mode = MODE_CONTROL
             self.confirm_action = ''
+
+        if self.fetch_error:
+            if self._edge('left', current):
+                self._cycle_offline_mode(-1)
+            if self._edge('right', current):
+                self._cycle_offline_mode(1)
+            if self._edge('press', current):
+                self._refresh_status(force=True)
+                self._set_notice('Pi4 online' if not self.fetch_error else 'Pi4 still offline', seconds=1.5)
+            self.previous_buttons = current
+            return
 
         if self._edge('left', current):
             self._cycle_mode(-1)
@@ -569,25 +874,93 @@ class StudioHatUI:
         for x, y, char, color in self.matrix.glyphs():
             draw.text((x, y), char, font=self.font_matrix, fill=color)
 
-        draw.rectangle((0, 0, self.width, 16), fill=(8, 16, 10))
-        draw.text((4, 2), 'PI4 OFFLINE', font=self.font_header, fill=(132, 236, 144))
-        draw.text((95, 2), time.strftime('%H:%M'), font=self.font_small, fill=(164, 200, 164))
+    def _draw_offline_clock(self, image, draw):
+        image.paste((4, 8, 18), (0, 0, self.width, self.height))
+        now = datetime.now()
+        for x in range(0, self.width, 16):
+            draw.line((x, 18, x, self.height - 18), fill=(18, 24, 36))
+        for y in range(18, self.height - 18, 16):
+            draw.line((0, y, self.width, y), fill=(18, 24, 36))
+        draw.text((14, 30), now.strftime('%H:%M'), font=self.font_clock, fill=(120, 220, 255))
+        draw.text((40, 63), now.strftime('%S'), font=self.font_clock_small, fill=(88, 188, 255))
+        draw.text((18, 84), now.strftime('%a %b %d'), font=self.font_clock_small, fill=(220, 236, 255))
+        draw.text((28, 100), now.strftime('%Y'), font=self.font_metric, fill=(152, 176, 214))
 
-        panel = Image.new('RGBA', (112, 46), (2, 10, 2, 210))
-        panel_draw = ImageDraw.Draw(panel)
-        panel_draw.rounded_rectangle((0, 0, 111, 45), radius=10, outline=(42, 132, 68), width=1, fill=(2, 10, 2, 210))
-        image.alpha_composite(panel, (8, 38))
+    def _draw_offline_stats(self, image, draw):
+        image.paste((8, 8, 12), (0, 0, self.width, self.height))
+        total_seconds = _safe_float(self.stream_stats.get('total_seconds'))
+        today_key = time.strftime('%Y-%m-%d')
+        today_seconds = _safe_float((self.stream_stats.get('daily_seconds') or {}).get(today_key))
+        labels = [
+            ('ZERO UP', _fmt_compact_duration(_read_system_uptime())),
+            ('TODAY', _fmt_compact_duration(today_seconds)),
+            ('TOTAL', _fmt_compact_duration(total_seconds)),
+            ('LAST PI4', self._last_seen_label()),
+        ]
+        y = 20
+        for label, value in labels:
+            draw.text((8, y), label, font=self.font_small, fill=(132, 160, 190))
+            draw.text((58, y - 1), value, font=self.font_metric, fill=(230, 236, 244))
+            y += 14
+
+        chart_x = 8
+        chart_y = 80
+        chart_w = 112
+        chart_h = 30
+        draw.rounded_rectangle((chart_x, chart_y, chart_x + chart_w, chart_y + chart_h), radius=6, outline=(70, 100, 132), width=1, fill=(12, 16, 24))
+        months = self._month_totals()
+        max_value = max([value for _, value in months] or [0.0])
+        if max_value <= 0:
+            draw.text((20, 91), 'No live history yet', font=self.font_small, fill=(136, 148, 166))
+            return
+
+        bar_w = 7
+        gap = 2
+        for idx, (_, value) in enumerate(months):
+            x1 = chart_x + 4 + idx * (bar_w + gap)
+            x2 = x1 + bar_w - 1
+            height = max(2, int((value / max_value) * (chart_h - 10))) if value > 0 else 1
+            y1 = chart_y + chart_h - 4 - height
+            color = (100, 210, 120) if idx == len(months) - 1 else (88, 146, 220)
+            draw.rectangle((x1, y1, x2, chart_y + chart_h - 4), fill=color)
+        draw.text((10, 112), '12M LIVE', font=self.font_small, fill=(142, 170, 200))
+
+    def _draw_offline_retro(self, image, draw):
+        dt = max(0.02, min(0.20, time.time() - self.last_frame_at))
+        self.retro.update(dt)
+        self.retro.draw(image, draw)
+
+    def _draw_offline_plasma(self, image, draw):
+        dt = max(0.02, min(0.20, time.time() - self.last_frame_at))
+        self.plasma.update(dt)
+        image.paste(self.plasma.draw(), (0, 0))
+
+    def _draw_offline_header(self, draw):
+        draw.rectangle((0, 0, self.width, 16), fill=(8, 12, 16))
+        draw.text((4, 2), 'PI4 OFF', font=self.font_header, fill=(132, 236, 144))
+        draw.text((70, 2), OFFLINE_MODE_LABELS[self.offline_mode], font=self.font_small, fill=(196, 204, 212))
+
+    def _draw_offline_view(self, image, draw):
+        if self.offline_mode == OFFLINE_MODE_MATRIX:
+            self._draw_offline_matrix(image, draw)
+        elif self.offline_mode == OFFLINE_MODE_CLOCK:
+            self._draw_offline_clock(image, draw)
+        elif self.offline_mode == OFFLINE_MODE_STATS:
+            self._draw_offline_stats(image, draw)
+        elif self.offline_mode == OFFLINE_MODE_RETRO:
+            self._draw_offline_retro(image, draw)
+        else:
+            self._draw_offline_plasma(image, draw)
         draw = ImageDraw.Draw(image)
-        draw.text((18, 48), 'Matrix standby', font=self.font_text, fill=(186, 244, 190))
-        draw.text((26, 64), 'Streamer down', font=self.font_small, fill=(150, 220, 158))
-        self._draw_footer(draw, 'JOY press refresh')
+        self._draw_offline_header(draw)
+        self._draw_footer(draw, 'L/R mode  PRESS ping')
 
     def _render(self):
         base = Image.new('RGBA', (self.width, self.height), (0, 0, 0, 255))
         draw = ImageDraw.Draw(base)
 
         if self.fetch_error:
-            self._draw_offline_matrix(base, draw)
+            self._draw_offline_view(base, draw)
         elif self.mode == MODE_STATUS:
             self._draw_header(draw)
             self._draw_status_mode(draw)
@@ -617,6 +990,7 @@ class StudioHatUI:
             time.sleep(0.05)
 
     def close(self):
+        self._handle_stream_disconnect()
         try:
             self.lcd.LCD_Clear()
         except Exception:
