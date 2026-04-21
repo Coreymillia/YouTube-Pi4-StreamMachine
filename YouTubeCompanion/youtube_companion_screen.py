@@ -72,14 +72,31 @@ def _load_screen_cfg():
     return cfg
 
 
-def _streamer_url(args):
+def _split_hosts(*values):
+    hosts = []
+    seen = set()
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            items = value
+        else:
+            items = str(value or '').replace(';', ',').split(',')
+        for item in items:
+            host = str(item).strip()
+            if not host or host in seen:
+                continue
+            seen.add(host)
+            hosts.append(host)
+    return hosts
+
+
+def _streamer_urls(args):
     if args.streamer_status_url:
-        return args.streamer_status_url
+        return [args.streamer_status_url]
     cfg = _load_screen_cfg()
-    host = cfg.get('streamer_status_host', '')
-    if not host:
-        return ''
-    return f"http://{host}:{cfg['streamer_status_port']}/status"
+    hosts = _split_hosts(cfg.get('streamer_status_hosts'), cfg.get('streamer_status_host', ''))
+    if not hosts:
+        return []
+    return [f"http://{host}:{cfg['streamer_status_port']}/status" for host in hosts]
 
 
 def _blank_streamer_state():
@@ -410,7 +427,10 @@ class CompanionScreen:
         self.last_ok = 0.0
         self.idle_since = None
         self.streamer = _blank_streamer_state()
-        self.streamer_status_url = _streamer_url(args)
+        self.streamer_status_url = ''
+        self.streamer_status_urls = _streamer_urls(args)
+        if self.streamer_status_urls:
+            self.streamer_status_url = self.streamer_status_urls[0]
         self._streamer_prev_sample = (0, 0, 0.0)
 
         self.dots = DotField(self.width, self.height, max(120, (self.width * self.height) // 18000))
@@ -461,7 +481,13 @@ class CompanionScreen:
         if now - self.last_refresh < self.args.poll_seconds:
             return
         self.last_refresh = now
-        self.streamer_status_url = _streamer_url(self.args)
+        urls = _streamer_urls(self.args)
+        if self.streamer_status_url and self.streamer_status_url in urls:
+            self.streamer_status_urls = [self.streamer_status_url] + [url for url in urls if url != self.streamer_status_url]
+        else:
+            self.streamer_status_urls = urls
+            if self.streamer_status_urls and not self.streamer_status_url:
+                self.streamer_status_url = self.streamer_status_urls[0]
         try:
             self.status = _fetch_json(self.args.status_url, self.args.http_timeout)
             self.auth = _fetch_json(self.args.auth_url, self.args.http_timeout)
@@ -469,12 +495,15 @@ class CompanionScreen:
             self.last_ok = now
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             self.fetch_error = str(exc)
-        if self.streamer_status_url:
-            try:
-                raw = _fetch_json(self.streamer_status_url, self.args.http_timeout)
-                self.streamer, self._streamer_prev_sample = _parse_streamer_state(raw, self._streamer_prev_sample, now)
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError):
-                self.streamer = _blank_streamer_state()
+        if self.streamer_status_urls:
+            for url in self.streamer_status_urls:
+                try:
+                    raw = _fetch_json(url, self.args.http_timeout)
+                    self.streamer_status_url = url
+                    self.streamer, self._streamer_prev_sample = _parse_streamer_state(raw, self._streamer_prev_sample, now)
+                    break
+                except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError):
+                    self.streamer = _blank_streamer_state()
         else:
             self.streamer = _blank_streamer_state()
 
@@ -893,7 +922,10 @@ class FramebufferScreen:
         self.last_ok = 0.0
         self.idle_since = None
         self.streamer = _blank_streamer_state()
-        self.streamer_status_url = _streamer_url(args)
+        self.streamer_status_url = ''
+        self.streamer_status_urls = _streamer_urls(args)
+        if self.streamer_status_urls:
+            self.streamer_status_url = self.streamer_status_urls[0]
         self._streamer_prev_sample = (0, 0, 0.0)
         self.dots = DotField(self.width, self.height, max(90, (self.width * self.height) // 22000))
         self.matrix = MatrixRain(self.width, self.height)
@@ -933,7 +965,13 @@ class FramebufferScreen:
         if now - self.last_refresh < self.args.poll_seconds:
             return
         self.last_refresh = now
-        self.streamer_status_url = _streamer_url(self.args)
+        urls = _streamer_urls(self.args)
+        if self.streamer_status_url and self.streamer_status_url in urls:
+            self.streamer_status_urls = [self.streamer_status_url] + [url for url in urls if url != self.streamer_status_url]
+        else:
+            self.streamer_status_urls = urls
+            if self.streamer_status_urls and not self.streamer_status_url:
+                self.streamer_status_url = self.streamer_status_urls[0]
         try:
             self.status = _fetch_json(self.args.status_url, self.args.http_timeout)
             self.auth = _fetch_json(self.args.auth_url, self.args.http_timeout)
@@ -941,12 +979,15 @@ class FramebufferScreen:
             self.last_ok = now
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             self.fetch_error = str(exc)
-        if self.streamer_status_url:
-            try:
-                raw = _fetch_json(self.streamer_status_url, self.args.http_timeout)
-                self.streamer, self._streamer_prev_sample = _parse_streamer_state(raw, self._streamer_prev_sample, now)
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError):
-                self.streamer = _blank_streamer_state()
+        if self.streamer_status_urls:
+            for url in self.streamer_status_urls:
+                try:
+                    raw = _fetch_json(url, self.args.http_timeout)
+                    self.streamer_status_url = url
+                    self.streamer, self._streamer_prev_sample = _parse_streamer_state(raw, self._streamer_prev_sample, now)
+                    break
+                except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError):
+                    self.streamer = _blank_streamer_state()
         else:
             self.streamer = _blank_streamer_state()
 

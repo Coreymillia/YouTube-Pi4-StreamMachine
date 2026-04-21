@@ -321,14 +321,32 @@ def _load_cfg():
     return cfg
 
 
-def _resolve_base_url(base_url):
+def _split_hosts(*values):
+    hosts = []
+    seen = set()
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            items = value
+        else:
+            items = str(value or '').replace(';', ',').split(',')
+        for item in items:
+            host = str(item).strip()
+            if not host or host in seen:
+                continue
+            seen.add(host)
+            hosts.append(host)
+    return hosts
+
+
+def _streamer_base_urls(base_url=''):
     if base_url:
-        return base_url.rstrip('/')
+        return [base_url.rstrip('/')]
     cfg = _load_cfg()
-    host = cfg.get('streamer_status_host')
-    if host:
-        return f"http://{host}:{cfg['streamer_status_port']}"
-    return 'http://127.0.0.1:8090'
+    hosts = _split_hosts(cfg.get('streamer_status_hosts'), cfg.get('streamer_status_host'))
+    port = cfg.get('streamer_status_port', 8090)
+    if hosts:
+        return [f'http://{host}:{port}' for host in hosts]
+    return ['http://127.0.0.1:8090']
 
 
 class MatrixRainLite:
@@ -392,12 +410,14 @@ class StudioHatUI:
     def __init__(self, args):
         self.args = args
         cfg = _load_cfg()
-        self.base_url = _resolve_base_url(args.base_url)
-        self.status_url = self.base_url + '/status'
-        self.snapshot_url = self.base_url + '/snapshot'
-        self.start_url = self.base_url + '/start'
-        self.stop_url = self.base_url + '/stop'
-        self.shutdown_url = self.base_url + '/shutdown'
+        self.base_urls = _streamer_base_urls(args.base_url)
+        self.base_url = self.base_urls[0]
+        self.status_url = ''
+        self.snapshot_url = ''
+        self.start_url = ''
+        self.stop_url = ''
+        self.shutdown_url = ''
+        self._set_base_url(self.base_url)
         self.control_token = cfg.get('streamer_control_token', '')
 
         self.width = 128
@@ -490,6 +510,21 @@ class StudioHatUI:
         self.notice = _clip(text, 26)
         self.notice_until = time.time() + seconds
 
+    def _set_base_url(self, base_url):
+        self.base_url = base_url.rstrip('/')
+        self.status_url = self.base_url + '/status'
+        self.snapshot_url = self.base_url + '/snapshot'
+        self.start_url = self.base_url + '/start'
+        self.stop_url = self.base_url + '/stop'
+        self.shutdown_url = self.base_url + '/shutdown'
+
+    def _candidate_base_urls(self):
+        urls = _streamer_base_urls(self.args.base_url)
+        self.base_urls = urls
+        if self.base_url in urls:
+            return [self.base_url] + [url for url in urls if url != self.base_url]
+        return urls
+
     def _mark_stream_seconds(self, delta, now):
         if delta <= 0:
             return
@@ -558,8 +593,16 @@ class StudioHatUI:
             return
         self.last_status_refresh = now
         was_offline = bool(self.fetch_error)
-        try:
-            self.status = self._fetch_json(self.status_url)
+        last_exc = None
+        for base_url in self._candidate_base_urls():
+            try:
+                self._set_base_url(base_url)
+                self.status = self._fetch_json(self.status_url)
+                last_exc = None
+                break
+            except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+                last_exc = exc
+        if last_exc is None:
             self.fetch_error = ''
             self.last_online_at = now
             self._update_stream_stats(now, bool(self.status.get('running')))
@@ -579,9 +622,9 @@ class StudioHatUI:
                 self.selected_cam = 1 if 1 in choices else choices[0]
             if self.control_index >= len(self._idle_control_actions()):
                 self.control_index = 0
-        except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+        else:
             self._handle_stream_disconnect()
-            self.fetch_error = str(exc)
+            self.fetch_error = str(last_exc)
             self.status = {}
             if not was_offline:
                 self.offline_mode = OFFLINE_MODE_MATRIX

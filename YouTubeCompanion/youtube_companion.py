@@ -50,6 +50,23 @@ _DEFAULTS = {
 _OAUTH_SCOPE = 'https://www.googleapis.com/auth/youtube.readonly'
 
 
+def _split_hosts(*values):
+    hosts = []
+    seen = set()
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            items = value
+        else:
+            items = str(value or '').replace(';', ',').split(',')
+        for item in items:
+            host = str(item).strip()
+            if not host or host in seen:
+                continue
+            seen.add(host)
+            hosts.append(host)
+    return hosts
+
+
 def _load_cfg():
     cfg = dict(_DEFAULTS)
     try:
@@ -60,7 +77,8 @@ def _load_cfg():
     cfg['listen_host'] = str(cfg.get('listen_host', '0.0.0.0')).strip() or '0.0.0.0'
     cfg['listen_port'] = int(cfg.get('listen_port', 8091))
     cfg['poll_interval_seconds'] = max(5, int(cfg.get('poll_interval_seconds', 15)))
-    cfg['streamer_status_host'] = str(cfg.get('streamer_status_host', '192.168.0.123')).strip()
+    hosts = _split_hosts(cfg.get('streamer_status_hosts'), cfg.get('streamer_status_host', '192.168.0.123'))
+    cfg['streamer_status_host'] = ', '.join(hosts) if hosts else '192.168.0.123'
     cfg['streamer_status_port'] = max(1, int(cfg.get('streamer_status_port', 8090)))
     cfg['streamer_control_token'] = str(cfg.get('streamer_control_token', '')).strip()[:120]
     cfg['oauth_client_id'] = str(cfg.get('oauth_client_id', '')).strip()
@@ -543,7 +561,7 @@ _HTML = """<!DOCTYPE html>
       <div class="row"><span class="label">OAuth Client ID</span><input id="client-id" value="__CLIENT_ID__" placeholder="Google OAuth client ID"></div>
       <div class="row"><span class="label">OAuth Client Secret</span><input id="client-secret" type="password" value="__CLIENT_SECRET__" placeholder="Google OAuth client secret"></div>
       <div class="row"><span class="label">Poll interval (seconds)</span><input id="poll-seconds" value="__POLL_SECONDS__" placeholder="15"></div>
-      <div class="row"><span class="label">Streamer Pi address / hostname</span><input id="streamer-host" value="__STREAMER_HOST__" placeholder="192.168.0.123"></div>
+      <div class="row"><span class="label">Streamer Pi address(es) / hostname(s)</span><input id="streamer-host" value="__STREAMER_HOST__" placeholder="192.168.0.123, 192.168.0.131"></div>
       <div class="row"><span class="label">Streamer Pi port</span><input id="streamer-port" value="__STREAMER_PORT__" placeholder="8090"></div>
       <div class="row"><span class="label">Streamer control token</span><input id="streamer-control-token" type="password" value="__STREAMER_CONTROL_TOKEN__" placeholder="Needed only for Pi shutdown"></div>
       <div class="row" style="margin-top:12px"><button onclick="saveSettings()">Save Settings</button> <button onclick="startAuth()">Start Device Auth</button> <button onclick="clearToken()">Clear Token</button></div>
