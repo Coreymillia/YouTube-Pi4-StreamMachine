@@ -45,6 +45,8 @@ _DEFAULTS = {
     'streamer_status_host': '192.168.0.123',
     'streamer_status_port': 8090,
     'streamer_control_token': '',
+    'forecast_latitude': None,
+    'forecast_longitude': None,
 }
 
 _OAUTH_SCOPE = 'https://www.googleapis.com/auth/youtube.readonly'
@@ -67,6 +69,16 @@ def _split_hosts(*values):
     return hosts
 
 
+def _safe_coord(value, minimum, maximum):
+    try:
+        coord = float(value)
+    except (TypeError, ValueError):
+        return None
+    if coord < minimum or coord > maximum:
+        return None
+    return coord
+
+
 def _load_cfg():
     cfg = dict(_DEFAULTS)
     try:
@@ -81,6 +93,8 @@ def _load_cfg():
     cfg['streamer_status_host'] = ', '.join(hosts) if hosts else '192.168.0.123'
     cfg['streamer_status_port'] = max(1, int(cfg.get('streamer_status_port', 8090)))
     cfg['streamer_control_token'] = str(cfg.get('streamer_control_token', '')).strip()[:120]
+    cfg['forecast_latitude'] = _safe_coord(cfg.get('forecast_latitude'), -90.0, 90.0)
+    cfg['forecast_longitude'] = _safe_coord(cfg.get('forecast_longitude'), -180.0, 180.0)
     cfg['oauth_client_id'] = str(cfg.get('oauth_client_id', '')).strip()
     cfg['oauth_client_secret'] = str(cfg.get('oauth_client_secret', '')).strip()
     return cfg
@@ -563,6 +577,8 @@ _HTML = """<!DOCTYPE html>
       <div class="row"><span class="label">Poll interval (seconds)</span><input id="poll-seconds" value="__POLL_SECONDS__" placeholder="15"></div>
       <div class="row"><span class="label">Streamer Pi address(es) / hostname(s)</span><input id="streamer-host" value="__STREAMER_HOST__" placeholder="192.168.0.123, 192.168.0.131"></div>
       <div class="row"><span class="label">Streamer Pi port</span><input id="streamer-port" value="__STREAMER_PORT__" placeholder="8090"></div>
+      <div class="row"><span class="label">Forecast latitude</span><input id="forecast-lat" value="__FORECAST_LAT__" placeholder="38.71"></div>
+      <div class="row"><span class="label">Forecast longitude</span><input id="forecast-lon" value="__FORECAST_LON__" placeholder="-105.14"></div>
       <div class="row"><span class="label">Streamer control token</span><input id="streamer-control-token" type="password" value="__STREAMER_CONTROL_TOKEN__" placeholder="Needed only for Pi shutdown"></div>
       <div class="row" style="margin-top:12px"><button onclick="saveSettings()">Save Settings</button> <button onclick="startAuth()">Start Device Auth</button> <button onclick="clearToken()">Clear Token</button></div>
       <div class="row" id="save-msg"></div>
@@ -613,6 +629,8 @@ _HTML = """<!DOCTYPE html>
         + '&poll_interval_seconds=' + encodeURIComponent(document.getElementById('poll-seconds').value)
         + '&streamer_status_host=' + encodeURIComponent(document.getElementById('streamer-host').value)
         + '&streamer_status_port=' + encodeURIComponent(document.getElementById('streamer-port').value)
+        + '&forecast_latitude=' + encodeURIComponent(document.getElementById('forecast-lat').value)
+        + '&forecast_longitude=' + encodeURIComponent(document.getElementById('forecast-lon').value)
         + '&streamer_control_token=' + encodeURIComponent(document.getElementById('streamer-control-token').value);
       fetch('/settings', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body})
         .then(r => r.json()).then(d => text('save-msg', d.ok ? 'Saved' : d.msg || 'Save failed'));
@@ -708,6 +726,16 @@ class _Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self._json({'ok': False, 'msg': 'Poll interval and streamer port must be numbers'})
                 return
+            forecast_lat = get('forecast_latitude', '')
+            forecast_lon = get('forecast_longitude', '')
+            cfg['forecast_latitude'] = None if forecast_lat.strip() == '' else _safe_coord(forecast_lat, -90.0, 90.0)
+            cfg['forecast_longitude'] = None if forecast_lon.strip() == '' else _safe_coord(forecast_lon, -180.0, 180.0)
+            if forecast_lat.strip() and cfg['forecast_latitude'] is None:
+                self._json({'ok': False, 'msg': 'Forecast latitude must be between -90 and 90'})
+                return
+            if forecast_lon.strip() and cfg['forecast_longitude'] is None:
+                self._json({'ok': False, 'msg': 'Forecast longitude must be between -180 and 180'})
+                return
             _save_cfg(cfg)
             _poll_once()
             self._json({'ok': True})
@@ -737,6 +765,8 @@ class _Handler(BaseHTTPRequestHandler):
             .replace('__POLL_SECONDS__', str(cfg.get('poll_interval_seconds', 15)))
             .replace('__STREAMER_HOST__', html.escape(cfg.get('streamer_status_host', '')))
             .replace('__STREAMER_PORT__', str(cfg.get('streamer_status_port', 8090)))
+            .replace('__FORECAST_LAT__', '' if cfg.get('forecast_latitude') is None else str(cfg.get('forecast_latitude')))
+            .replace('__FORECAST_LON__', '' if cfg.get('forecast_longitude') is None else str(cfg.get('forecast_longitude')))
             .replace('__STREAMER_CONTROL_TOKEN__', html.escape(cfg.get('streamer_control_token', '')))
         ).encode()
         self._send(200, body, 'text/html; charset=utf-8')

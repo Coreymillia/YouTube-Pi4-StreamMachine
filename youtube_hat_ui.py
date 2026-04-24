@@ -120,6 +120,16 @@ def _safe_float(value, default=0.0):
         return default
 
 
+def _safe_coord(value, minimum, maximum):
+    try:
+        coord = float(value)
+    except (TypeError, ValueError):
+        return None
+    if coord < minimum or coord > maximum:
+        return None
+    return coord
+
+
 def _read_system_uptime():
     try:
         with open('/proc/uptime') as f:
@@ -304,6 +314,8 @@ def _load_cfg():
         'streamer_status_host': '',
         'streamer_status_port': 8090,
         'streamer_control_token': '',
+        'forecast_latitude': None,
+        'forecast_longitude': None,
     }
     try:
         with open(_CONFIG_PATH) as f:
@@ -318,6 +330,8 @@ def _load_cfg():
     except (TypeError, ValueError):
         cfg['streamer_status_port'] = 8090
     cfg['streamer_control_token'] = str(cfg.get('streamer_control_token', '')).strip()[:120]
+    cfg['forecast_latitude'] = _safe_coord(cfg.get('forecast_latitude'), -90.0, 90.0)
+    cfg['forecast_longitude'] = _safe_coord(cfg.get('forecast_longitude'), -180.0, 180.0)
     return cfg
 
 
@@ -445,6 +459,12 @@ class StudioHatUI:
         self.last_stats_save = 0.0
         self.last_stream_sample = None
         self.last_stream_running = False
+        self.weather_temp_line = ''
+        self.weather_desc = ''
+        self.weather_error = ''
+        self.weather_updated_at = 0.0
+        self.weather_refresh_after = 0.0
+        self.weather_location = (None, None)
 
         self.font_header = _font(_FONT_PATH_BOLD, 12)
         self.font_title = _font(_FONT_PATH_BOLD, 16)
@@ -509,6 +529,97 @@ class StudioHatUI:
     def _set_notice(self, text, seconds=2.5):
         self.notice = _clip(text, 26)
         self.notice_until = time.time() + seconds
+
+    def _forecast_coords(self):
+        cfg = _load_cfg()
+        lat = cfg.get('forecast_latitude')
+        lon = cfg.get('forecast_longitude')
+        if lat is None or lon is None:
+            return (None, None)
+        return (lat, lon)
+
+    def _forecast_high_low(self, periods):
+        current = periods[0] if periods else {}
+        current_temp = current.get('temperature')
+        if current_temp is None:
+            return (None, None)
+        high = current_temp if current.get('isDaytime') else None
+        low = current_temp if not current.get('isDaytime') else None
+        for period in periods[1:6]:
+            temp = period.get('temperature')
+            if temp is None:
+                continue
+            if period.get('isDaytime') and high is None:
+                high = temp
+            if not period.get('isDaytime') and low is None:
+                low = temp
+            if high is not None and low is not None:
+                break
+        return (high, low)
+
+    def _format_forecast(self, periods):
+        current = periods[0] if periods else {}
+        temp = current.get('temperature')
+        unit = str(current.get('temperatureUnit') or 'F').strip()[:1]
+        short = str(current.get('shortForecast') or '').strip()
+        if temp is None and not short:
+            return '', ''
+        high, low = self._forecast_high_low(periods)
+        temp_line = f'{temp}{unit}' if temp is not None else ''
+        if high is not None and low is not None:
+            temp_line = f'{temp}{unit}-{high}/{low}'
+        elif high is not None and high != temp:
+            temp_line = f'{temp}{unit}-{high}'
+        elif low is not None and low != temp:
+            temp_line = f'{temp}{unit}-{low}'
+        return temp_line[:16], short[:36]
+
+    def _refresh_weather(self, force=False):
+        now = time.time()
+        coords = self._forecast_coords()
+        if coords != self.weather_location:
+            self.weather_location = coords
+            self.weather_temp_line = ''
+            self.weather_desc = ''
+            self.weather_error = ''
+            self.weather_updated_at = 0.0
+            self.weather_refresh_after = 0.0
+        lat, lon = coords
+        if lat is None or lon is None:
+            self.weather_error = 'Set forecast lat/lon in companion UI'
+            return
+        if not force and now < self.weather_refresh_after and (self.weather_temp_line or self.weather_desc or self.weather_error):
+            return
+        try:
+            req = urllib.request.Request(
+                f'https://api.weather.gov/points/{lat:.4f},{lon:.4f}',
+                headers={'User-Agent': 'youtube-pi-zero-hat/1.0'},
+            )
+            with urllib.request.urlopen(req, timeout=min(self.args.http_timeout, 4.0)) as resp:
+                points = json.load(resp)
+            forecast_url = (((points.get('properties') or {}).get('forecast')) or '').strip()
+            if not forecast_url:
+                raise ValueError('Forecast endpoint unavailable')
+            req = urllib.request.Request(
+                forecast_url,
+                headers={'User-Agent': 'youtube-pi-zero-hat/1.0'},
+            )
+            with urllib.request.urlopen(req, timeout=min(self.args.http_timeout, 4.0)) as resp:
+                forecast = json.load(resp)
+            periods = ((forecast.get('properties') or {}).get('periods')) or []
+            temp_line, desc = self._format_forecast(periods)
+            if not temp_line and not desc:
+                raise ValueError('Forecast summary unavailable')
+            self.weather_temp_line = temp_line
+            self.weather_desc = desc
+            self.weather_error = ''
+            self.weather_updated_at = now
+            self.weather_refresh_after = now + 900.0
+        except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+            self.weather_temp_line = ''
+            self.weather_desc = ''
+            self.weather_error = str(exc)
+            self.weather_refresh_after = now + 300.0
 
     def _set_base_url(self, base_url):
         self.base_url = base_url.rstrip('/')
@@ -920,14 +1031,23 @@ class StudioHatUI:
     def _draw_offline_clock(self, image, draw):
         image.paste((4, 8, 18), (0, 0, self.width, self.height))
         now = datetime.now()
+        self._refresh_weather()
         for x in range(0, self.width, 16):
             draw.line((x, 18, x, self.height - 18), fill=(18, 24, 36))
         for y in range(18, self.height - 18, 16):
             draw.line((0, y, self.width, y), fill=(18, 24, 36))
-        draw.text((14, 30), now.strftime('%H:%M'), font=self.font_clock, fill=(120, 220, 255))
-        draw.text((40, 63), now.strftime('%S'), font=self.font_clock_small, fill=(88, 188, 255))
-        draw.text((18, 84), now.strftime('%a %b %d'), font=self.font_clock_small, fill=(220, 236, 255))
-        draw.text((28, 100), now.strftime('%Y'), font=self.font_metric, fill=(152, 176, 214))
+        draw.text((18, 12), now.strftime('%H:%M'), font=self.font_clock, fill=(120, 220, 255))
+        draw.text((24, 44), now.strftime('%a %b %d'), font=self.font_clock_small, fill=(220, 236, 255))
+        temp_line = self.weather_temp_line or '--'
+        temp_color = (232, 238, 244) if self.weather_temp_line else (176, 184, 196)
+        draw.text((10, 62), temp_line, font=self.font_clock_small, fill=temp_color)
+        forecast = self.weather_desc or self.weather_error or 'Forecast unavailable'
+        color = (232, 238, 244) if self.weather_desc else (176, 184, 196)
+        lines = self._wrap_text(forecast, 18)[:2]
+        y = 92
+        for line in lines:
+            draw.text((10, y), line, font=self.font_small, fill=color)
+            y += 12
 
     def _draw_offline_stats(self, image, draw):
         image.paste((8, 8, 12), (0, 0, self.width, self.height))
