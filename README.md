@@ -227,6 +227,18 @@ sudo systemctl disable --now youtube-hat-ui.service
 
 ---
 
+## Optional Pi-hole HAT companion
+
+If you already run **Pi-hole** on another Raspberry Pi and want a **minimal streamer companion UI**, there is now a separate repo for that:
+
+**[Coreymillia/pihole-hat-dashboard](https://github.com/Coreymillia/pihole-hat-dashboard)**
+
+That project adds a small Waveshare 1.44" LCD HAT dashboard for Pi-hole and can optionally show a **STREAMER** control/status page for this Pi 4 streamer. The streamer page stays hidden unless the configured Pi 4 is reachable, so it does not clutter the normal Pi-hole display when the streamer is offline.
+
+This keeps the Pi-hole dashboard separate from the main streamer project, while still giving Pi-hole users a compact start/stop/status companion if they want one.
+
+---
+
 ## YouTube Companion (Pi Zero 2 W)
 
 The main Pi can now be paired with a separate **Pi Zero 2 W companion** that watches the **YouTube-side** view of the stream instead of the local encoder side. This is useful for answering questions like:
